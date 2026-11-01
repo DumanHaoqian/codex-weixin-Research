@@ -742,7 +742,7 @@ export class BridgeService {
     try {
       console.log(`[codex-weixin] sending reply to ${senderId}; text=${text.length} chars`);
       await this.options.weixin.sendText({ toUserId: senderId, text, contextToken });
-      console.log(`[codex-weixin] sent reply to ${senderId}`);
+      console.log(`[codex-weixin] reply accepted by API for ${senderId}; client delivery unconfirmed`);
     } catch (error) {
       if (isStaleContextError(error)) {
         console.warn(`WeChat context token is stale for ${senderId}; ask user to send a fresh message.`);

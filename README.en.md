@@ -1,4 +1,8 @@
-<h1 align="center">codex-weixin</h1>
+<h1 align="center">codex-weixin-Research</h1>
+
+A research collaboration variant based on [MrGaoGang/codex-weixin-bridge](https://github.com/MrGaoGang/codex-weixin-bridge) v0.0.33. Adds global collaboration memory, project and skill navigation, lazy project-memory reads, and project-ID-directed updates. See [memory documentation](./MEMORY-FEATURE.md) and [portable examples](./examples/memory/).
+
+This repository contains source, tests, and generic examples. WeChat authorization, server credentials/configuration, actual chat logs, and personal memories remain local. Task scheduling is not implemented. The upstream instructions below still reference upstream npm releases. Build this variant with `npm ci && npm run build`, then use `npm start`.
 
 > Forked from [XavierJiezou/codex-weixin](https://github.com/XavierJiezou/codex-weixin). Maintained at [MrGaoGang/codex-weixin-bridge](https://github.com/MrGaoGang/codex-weixin-bridge).
 

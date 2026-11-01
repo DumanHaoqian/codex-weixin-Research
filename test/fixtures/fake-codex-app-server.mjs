@@ -168,6 +168,8 @@ rl.on("line", (line) => {
   if (message.method === "turn/start") {
     const turnId = `turn-${nextTurn++}`;
     let prompt = message.params?.input?.[0]?.text;
+    // Fixture commands describe the user payload; production also adds memory context.
+    if (typeof prompt === "string") prompt = prompt.replace(/^\[codex-weixin-memory-context\]\n[\s\S]*?\n\[\/codex-weixin-memory-context\]\n\s*/, "");
     if (prompt === "permissions") prompt = JSON.stringify({ thread: threadParams.get(message.params.threadId), turn: message.params, args: process.argv.slice(2) });
     if (message.params?.input?.[0]?.type !== "text" || typeof prompt !== "string") {
       fail(message.id, "turn/start requires text input");

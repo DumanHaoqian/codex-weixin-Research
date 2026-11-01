@@ -2,9 +2,25 @@ node_modules/
 dist/
 coverage/
 output/
+tmp/
 .playwright-cli/
 .env
 .codex-weixin/
 .codex-weixin-bridge/
 *.log
 *.tsbuildinfo
+.DS_Store
+.env.*
+!.env.example
+.npmrc
+# Local bridge state and private machine configuration are not source code.
+/memory/
+/accounts/
+/runtime/
+/inbound/
+/logs/
+/server-tools/
+/config.json
+/.ssh/
+*.pem
+*.key

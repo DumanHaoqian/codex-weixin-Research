@@ -21,6 +21,8 @@ concurrency:
 
 jobs:
   publish:
+    # Forks must configure their own package identity and release workflow first.
+    if: github.repository == 'MrGaoGang/codex-weixin-bridge'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

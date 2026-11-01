@@ -66,7 +66,7 @@ rl.on("line", async (line) => {
     return;
   }
   if (message.method === "turn/start") {
-    const prompt = message.params.input[0].text;
+    const prompt = message.params.input[0].text.replace(/^\[codex-weixin-memory-context\]\n[\s\S]*?\n\[\/codex-weixin-memory-context\]\n\s*/, "");
     if (prompt === "fail-always") {
       send({ id: message.id, error: { code: -32000, message: "simulated app-server turn/start failed" } });
       return;

@@ -1,0 +1,31 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import assert from 'node:assert/strict';
+import {fileURLToPath} from 'node:url';
+import {HybridCodexRunner} from '../dist/codex/runner.js';
+import {applyMemoryUpdates,registerMemoryProject,projectMemoryFile,withMemory} from '../dist/bridge/memory.js';
+const project=fileURLToPath(new URL('../',import.meta.url));
+fs.mkdirSync(path.join(project,'tmp'),{recursive:true});
+const root=fs.mkdtempSync(path.join(project,'tmp/memory-live-'));
+const a=path.join(root,'A'), b=path.join(root,'B'), state=path.join(root,'state');fs.mkdirSync(a);fs.mkdirSync(b);
+fs.writeFileSync(path.join(a,'AGENTS.md'),'# Test project\nRead the selected project memory for this test. Do not run jobs or contact servers.\n');
+registerMemoryProject(a,state,'Alpha','alpha');registerMemoryProject(b,state,'Beta','beta');
+const goal='GOAL-'+crypto.randomBytes(5).toString('hex');
+const next='NEXT-'+crypto.randomBytes(5).toString('hex');
+const change='PROGRESS-'+crypto.randomBytes(5).toString('hex');
+const action=updates=>'```codex-weixin-memory\n'+JSON.stringify({updates})+'\n```';
+applyMemoryUpdates(action([{scope:'global',operation:'remember',text:'全局测试标识 GLOBAL-2846'},{scope:'project',projectId:'alpha',operation:'remember',text:'[目标] '+goal},{scope:'project',projectId:'alpha',operation:'remember',text:'[下一步] '+next}]),a,state);
+assert.ok(!withMemory('你好',a,state).includes(goal));
+const runner=new HybridCodexRunner({backend:'app-server',memoryRoot:state,codexBin:process.env.CODEX_BIN || 'codex',execSandbox:'workspace-write',approvalPolicy:'never',timeoutMs:120000});
+try{
+ const greeting=await runner.run({cwd:b,effort:'low',prompt:'你好，这是只读验收。只回复全局测试标识，不要读取任何文件或更新记忆。'});
+ assert.match(greeting.text,/GLOBAL-2846/);assert.ok(!greeting.text.includes(goal));console.log('greeting:',greeting.text);
+ const continued=await runner.run({cwd:b,effort:'low',prompt:'现在继续开发 Alpha 项目。请按索引实际读取该项目记忆和 AGENTS.md，只告诉我目标与下一步；不要修改文件或运行其他任务。'});
+ assert.notEqual(greeting.threadId,continued.threadId);assert.ok(continued.text.includes(goal));assert.ok(continued.text.includes(next));console.log('selected project:',continued.text);
+ const update=await runner.run({cwd:b,threadId:continued.threadId,effort:'low',prompt:`这是用户确认的本地验收结论：请为当前选中的 Alpha 项目记住一条进度“[进度] ${change}”。用记忆动作保存，不要运行其他任务。`});
+ assert.ok(fs.readFileSync(projectMemoryFile('alpha',state),'utf8').includes(change));assert.equal(fs.existsSync(projectMemoryFile('beta',state)),false);console.log('targeted write:',update.text);
+ const fresh=await runner.run({cwd:a,effort:'low',prompt:'你好，这是全新的会话。只回复全局测试标识，不要读取任何项目文件或更新记忆。'});
+ assert.notEqual(continued.threadId,fresh.threadId);assert.ok(!fresh.text.includes(goal));console.log('fresh /new:',fresh.text);
+ console.log('PASS: global/index only at initialization; explicit selection reads project; selected ID controls writes from another cwd; fresh thread has no project body.');
+}finally{runner.close();}

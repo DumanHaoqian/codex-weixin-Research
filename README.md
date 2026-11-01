@@ -1,4 +1,8 @@
-<h1 align="center">codex-weixin-bridge</h1>
+<h1 align="center">codex-weixin-Research</h1>
+
+科研协作改版，基于 [MrGaoGang/codex-weixin-bridge](https://github.com/MrGaoGang/codex-weixin-bridge) 的 v0.0.33。新增全局协作记忆、项目路径与技能导航、按需读取项目记忆和按项目 ID 保存进度。详见 [记忆功能说明](./MEMORY-FEATURE.md)；可复制的示例在 [examples/memory](./examples/memory/)。
+
+本仓库保存源码、测试和通用示例。本机微信授权、服务器登录配置、实际聊天记录与项目记忆不随源码上传。定时任务尚未实现。下方保留上游安装与使用说明；其中 npm 包仍指向上游发布版。本改版可通过 `npm ci && npm run build` 构建，再运行 `npm start`。
 
 > 声明: 本项目 Fork 自 [XavierJiezou/codex-weixin](https://github.com/XavierJiezou/codex-weixin)，并进行了 功能优化/新增，十分感谢上游作者及贡献者。
 

@@ -7,6 +7,7 @@ import {
 } from "./app-server-runner.js";
 import { CodexExecRunner, type CodexRunResult } from "./exec-runner.js";
 import type { CodexApprovalPolicy, CodexExecSandbox } from "./sandbox.js";
+import { applyMemoryUpdates, withMemory } from "../bridge/memory.js";
 
 export type CodexBackend = "auto" | "app-server" | "exec";
 
@@ -16,6 +17,7 @@ export type HybridCodexRunnerOptions = {
   execSandbox?: CodexExecSandbox;
   approvalPolicy?: CodexApprovalPolicy;
   timeoutMs?: number;
+  memoryRoot?: string;
 };
 
 export class HybridCodexRunner {
@@ -40,6 +42,11 @@ export class HybridCodexRunner {
   }
 
   async run(input: CodexRunnerInput): Promise<CodexRunResult> {
+    const result = await this.runWithMemory({ ...input, prompt: withMemory(input.prompt, input.cwd, this.options.memoryRoot) });
+    return { ...result, text: applyMemoryUpdates(result.text, input.cwd, this.options.memoryRoot) };
+  }
+
+  private async runWithMemory(input: CodexRunnerInput): Promise<CodexRunResult> {
     const requiresAppServerForStreaming = Boolean(input.onDelta || input.onProgress);
     if (this.options.backend === "exec" && !requiresAppServerForStreaming) {
       return this.exec.run(input);
