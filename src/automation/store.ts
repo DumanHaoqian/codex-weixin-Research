@@ -18,12 +18,14 @@ try {
   db = new DatabaseSync(workerData.file);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
   const version = db.prepare('PRAGMA user_version').get().user_version;
-  if (version > 1) throw new Error('Unsupported automation schema version: ' + version);
+  if (version > 2) throw new Error('Unsupported automation schema version: ' + version);
   db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
   db.exec('BEGIN IMMEDIATE');
   try {
     db.exec(workerData.schema);
-    db.exec('PRAGMA user_version=1; COMMIT');
+    if (!db.prepare('PRAGMA table_info(notification_attempts)').all().some(c => c.name === 'part_id'))
+      db.exec('ALTER TABLE notification_attempts ADD COLUMN part_id TEXT REFERENCES notification_parts(id)');
+    db.exec('PRAGMA user_version=2; COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   parentPort.postMessage({ready:true});
 } catch (e) { try { db?.close(); } catch {} parentPort.postMessage({fatal:String(e.message)}); parentPort.close(); }
@@ -96,6 +98,11 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE TABLE IF NOT EXISTS notification_attempts (
  id TEXT PRIMARY KEY, notification_id TEXT NOT NULL REFERENCES notifications(id),
  state TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, error TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS notification_parts (
+ id TEXT PRIMARY KEY, notification_id TEXT NOT NULL REFERENCES notifications(id),
+ part_index INTEGER NOT NULL, content TEXT NOT NULL, state TEXT NOT NULL,
+ attempt_id TEXT, UNIQUE(notification_id,part_index)
 ) STRICT;
 `;
 

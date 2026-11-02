@@ -8,7 +8,7 @@ This ledger records implementation evidence; an implemented slice is not complet
 | --- | --- | --- |
 | Design baseline | committed | Approved requirements and system design preserved in Git |
 | M0 capability/storage foundation | in progress | Worker SQLite, transactional schema and fail-closed capability report; authorized MCP transport, restricted agent profile and remote expiry still require implementation/verification |
-| M1 general scheduling | in progress | Temporal calendar, owner-scoped task service, revisions, creation idempotency, atomic reminder result/outbox, opt-in runtime and authenticated management API implemented. Web/WeChat controls, manual runs and actual delivery remain pending |
+| M1 general scheduling | in progress | Calendar, task service, creation idempotency, result/outbox, opt-in runtime/API and multipart WeChat delivery implemented. Web/WeChat controls, inbound wake wiring and manual runs still in progress |
 | M2 research observation | pending | Job attach, GPU sampler, monitor and semantic events |
 | M3 execution/resources | pending | Recipe grants, remote protocol, both GPU modes, TTL and handoff |
 | M4 research results/literature | pending | Validation/comparison and provider cursors |
@@ -25,3 +25,5 @@ Baseline comparison: an independent worktree at 50114c5 passed 237/242 tests; im
 Additional hardening revalidates project bindings at execution and rejects remote automation startup without Web authentication. The current chat exposes no polyu4090 tools, so no real background MCP/server/GPU validation has been performed; M0 remains incomplete.
 
 Latest targeted validation: all 42 selected tests passed, including 13 automation tests and existing HTTP/account/restart coverage, after the bounded Windows fixture cleanup correction. Typecheck and build passed. This count is a test count, not completion of the 42 product acceptance scenarios.
+
+Delivery slice: schema v2 transactionally adds notification parts and attempt linkage while preserving v1 records. Each accepted part is retained; rejected parts can resume, in-flight crash/ambiguous transport become unknown without automatic replay. Missing context waits for a fresh original-sender wake. AccountManager uses the original account, current access and current context; never lastActiveSenderId. Typecheck and 32 selected tests passed (18 automation plus account coverage). Actual phone receipt has not been verified; api_accepted is not delivered. Earlier notes about delivery being unimplemented describe prior commits only.

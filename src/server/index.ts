@@ -80,6 +80,7 @@ async function main(): Promise<void> {
         throw new Error('Remote automation access requires configured Web authentication');
       }
       automation = new AutomationRuntime(paths.root, {
+        send:(owner,text)=>accountManager.sendAutomationText(owner,text),
         authorize: (owner) => {
           const account = accountManager.listAccounts().find(item=>item.accountId===owner.accountId);
           return Boolean(account?.enabled && (account.pairedSenderIds.includes(owner.senderId)

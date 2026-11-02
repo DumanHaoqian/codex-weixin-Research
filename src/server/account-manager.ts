@@ -24,7 +24,9 @@ import {
   type PublicWeixinAccount,
   type WeixinAccount
 } from "../weixin/accounts.js";
-import { WeixinApiClient } from "../weixin/api.js";
+import { WeixinApiClient, WeixinApiError } from "../weixin/api.js";
+import type { DeliveryOutcome } from "../automation/delivery.js";
+import type { Owner } from "../automation/tasks.js";
 import { monitorWeixin, type MonitorOptions } from "../weixin/monitor.js";
 import { inferMediaKind, sanitizeFileName } from "../weixin/media.js";
 
@@ -93,6 +95,24 @@ export type AccountManagerOptions = {
 };
 
 export class AccountManager {
+  async sendAutomationText(owner:Owner,text:string):Promise<DeliveryOutcome>{
+    const account=listAccounts(this.options.paths).find(item=>item.accountId===owner.accountId);
+    if(!account?.enabled)return {state:'deferred',code:'account_disabled'};
+    const store=this.storeFor(owner.accountId);
+    if(!store.listPairedSenderIds().includes(owner.senderId)&&!this.configProvider().allowedSenderIds.includes(owner.senderId))
+      return {state:'deferred',code:'sender_not_allowed'};
+    const contextToken=store.getContextToken(owner.senderId);
+    if(!contextToken)return {state:'deferred',code:'context_missing'};
+    try{
+      await this.clientFactory(account).sendText({toUserId:owner.senderId,text,contextToken});
+      return {state:'api_accepted'};
+    }catch(error){
+      // HTTP/network/malformed-response failures may have occurred after acceptance.
+      if(error instanceof WeixinApiError && ((error.ret!==undefined&&error.ret!==0)||(error.errcode!==undefined&&error.errcode!==0)))
+        return {state:'failed',code:`weixin_${error.ret??0}_${error.errcode??0}`};
+      return {state:'unknown',code:'send_outcome_unknown'};
+    }
+  }
   private readonly entries = new Map<string, RuntimeEntry>();
   private readonly respondingSessions = new Map<string, number>();
   private readonly configProvider: () => CodexWeixinConfig;
