@@ -74,6 +74,11 @@ async function main(): Promise<void> {
   };
   try {
     if (process.env.CODEX_WEIXIN_AUTOMATION === '1') {
+      const bindHost = process.env.CODEX_WEIXIN_HOST || '127.0.0.1';
+      if (!['127.0.0.1','::1','localhost'].includes(bindHost)
+        && (!process.env.CODEX_WEIXIN_USERNAME || !process.env.CODEX_WEIXIN_PASSWORD)) {
+        throw new Error('Remote automation access requires configured Web authentication');
+      }
       automation = new AutomationRuntime(paths.root, {
         authorize: (owner) => {
           const account = accountManager.listAccounts().find(item=>item.accountId===owner.accountId);

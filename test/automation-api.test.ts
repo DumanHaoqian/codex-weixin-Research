@@ -3,9 +3,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { AutomationRuntime } from '../src/automation/runtime.js';
 import { startLocalHttpServer } from '../src/server/http-server.js';
 import { resolveStatePaths } from '../src/state/paths.js';
+import { defaultConfig, saveConfig } from '../src/state/config.js';
 
 test('automation API inherits CSRF checks and verifies the requested owner',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'automation-api-'));
@@ -43,4 +46,17 @@ test('disabled preview serves status and refuses activation without creating a d
     assert.equal((await fetch(server.url+'/api/automation/tasks?accountId=a&senderId=s')).status,503);
     assert.equal(fs.existsSync(path.join(root,'automation')),false);
   } finally {await server.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('remote automation refuses startup without Web authentication',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'automation-auth-'));
+  saveConfig(resolveStatePaths(root),defaultConfig(root));
+  try {
+    assert.throws(()=>execFileSync(process.execPath,['--import',import.meta.resolve('tsx'),
+      fileURLToPath(new URL('../src/server/index.ts',import.meta.url)),'--foreground'],{
+      cwd:root,timeout:5000,stdio:'pipe',env:{...process.env,CODEX_WEIXIN_STATE_DIR:root,
+        CODEX_WEIXIN_AUTOMATION:'1',CODEX_WEIXIN_HOST:'0.0.0.0',CODEX_WEIXIN_OPEN:'0',
+        CODEX_WEIXIN_USERNAME:'',CODEX_WEIXIN_PASSWORD:''}
+    }),error=>/Remote automation access requires configured Web authentication/.test(String((error as {stderr?:Buffer}).stderr)));
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

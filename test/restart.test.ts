@@ -8,7 +8,8 @@ import test from "node:test";
 // Exercise the detached helper after an update has moved the installer's cwd.
 test("restart helper restores launch cwd and retains deployment environment", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-restart-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // The detached entry may have written result.json before Windows releases its cwd.
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const launchCwd = path.join(root, "launch");
   fs.mkdirSync(launchCwd);
   const output = path.join(root, "result.json");

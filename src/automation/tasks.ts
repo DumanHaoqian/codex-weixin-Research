@@ -135,9 +135,12 @@ export class TaskService {
       for (const row of due) {
         const task = decode(row);
         const allowed = await this.options.authorize(task.owner);
+        let bindingValid = true;
+        try { await this.options.validateActivation?.(task.definition); }
+        catch { bindingValid = false; }
         const scheduled = task.nextDue!;
         const next = nextAfter(task.definition.schedule, now);
-        const state = !allowed ? 'blocked' : now - scheduled > 300_000 ? 'missed' : task.definition.kind !== 'reminder' ? 'blocked' : 'succeeded';
+        const state = !allowed || !bindingValid ? 'blocked' : now - scheduled > 300_000 ? 'missed' : task.definition.kind !== 'reminder' ? 'blocked' : 'succeeded';
         const occurrence = crypto.randomUUID(), run = crypto.randomUUID(), event = crypto.randomUUID();
         const statements: Statement[] = [
           { sql: 'INSERT INTO occurrences VALUES (?,?,?,?,?,?)', params: [occurrence,task.id,task.revision,scheduled,String(scheduled),state] },

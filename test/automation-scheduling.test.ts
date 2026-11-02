@@ -90,3 +90,15 @@ test('research tasks can be drafted but cannot activate without implemented capa
     assert.equal((await service.get(owner,draft.id)).state,'draft');
   } finally { await store.close(); }
 });
+
+test('project validation is rechecked at execution, not only at creation',async()=>{
+  let now=0, bindingValid=true;
+  const store=new AutomationStore(':memory:');
+  const service=new TaskService(store,{now:()=>now,authorize:()=>true,
+    validateActivation:()=>{if(!bindingValid)throw new Error('Project changed');}});
+  try {
+    const task=await service.create(owner,'project',{...reminder(1000),projectId:'research-project'});
+    bindingValid=false;now=1000;await service.tick();
+    assert.equal((await store.all('SELECT state FROM runs WHERE task_id=?',[task.id]))[0].state,'blocked');
+  } finally {await store.close();}
+});
