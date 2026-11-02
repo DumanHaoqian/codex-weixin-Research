@@ -16,6 +16,7 @@ import { acquireServiceProcessLock } from "./process-lock.js";
 import { launchRestartHelper } from "./restart.js";
 import { startRestartControl, stopService } from "./restart-control.js";
 import { isCurrentRuntimeInstallable, UpdateManager } from "./update-manager.js";
+import { AutomationRuntime } from "../automation/runtime.js";
 
 async function main(): Promise<void> {
   const launchCwd = process.cwd();
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
   }
   const processLock = acquireServiceProcessLock(paths.root);
   const accountManager = new AccountManager({ paths });
+  let automation: AutomationRuntime | undefined;
   let server: Awaited<ReturnType<typeof startLocalHttpServer>> | undefined;
   let restartControl: Awaited<ReturnType<typeof startRestartControl>> | undefined;
   let shutdownPromise: Promise<void> | undefined;
@@ -37,6 +39,7 @@ async function main(): Promise<void> {
   const shutdown = (): Promise<void> => {
     shutdownPromise ??= (async () => {
       try {
+        await automation?.close();
         await accountManager.stopAll();
         await restartControl?.close();
         await server?.close();
@@ -70,9 +73,20 @@ async function main(): Promise<void> {
     timer.unref();
   };
   try {
+    if (process.env.CODEX_WEIXIN_AUTOMATION === '1') {
+      automation = new AutomationRuntime(paths.root, {
+        authorize: (owner) => {
+          const account = accountManager.listAccounts().find(item=>item.accountId===owner.accountId);
+          return Boolean(account?.enabled && (account.pairedSenderIds.includes(owner.senderId)
+            || loadConfig(paths).allowedSenderIds.includes(owner.senderId)));
+        }
+      });
+      await automation.start();
+    }
     server = await startLocalHttpServer({
       paths,
       accountManager,
+      automation,
       port,
       username: process.env.CODEX_WEIXIN_USERNAME,
       password: process.env.CODEX_WEIXIN_PASSWORD,
@@ -85,6 +99,7 @@ async function main(): Promise<void> {
       void shutdown().finally(() => process.exit(0));
     }, server.url);
   } catch (error) {
+    await automation?.close();
     await accountManager.stopAll();
     await restartControl?.close();
     await server?.close();

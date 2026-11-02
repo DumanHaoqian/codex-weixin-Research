@@ -15,6 +15,8 @@ import type { CodexModelOption, CodexRuntimeInfo } from "../codex/app-server-run
 import type { AccountManager, SessionAttachmentFile, SessionHistoryMessage, SessionUpload } from "./account-manager.js";
 import { LoginManager } from "./login-manager.js";
 import { UpdateManager, type UpdateService } from "./update-manager.js";
+import type { AutomationRuntime } from "../automation/runtime.js";
+import { automationRoute } from "./automation-routes.js";
 
 const bodySchema = z.record(z.string(), z.unknown());
 const accountDisplayNameSchema = z.object({
@@ -48,6 +50,7 @@ const webRoot = fileURLToPath(new URL("../web", import.meta.url));
 const execFileAsync = promisify(execFile);
 
 export type LocalHttpServerOptions = {
+  automation?: AutomationRuntime;
   paths: StatePaths;
   accountManager: AccountManager;
   loginManager?: LoginManager;
@@ -185,6 +188,14 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       sendJson(response, 403, { error: "Invalid request token" });
       return;
     }
+  }
+
+  if (url.pathname.startsWith('/api/automation/')) {
+    const body = ['POST','PATCH'].includes(method) ? await readJsonBody(request) : undefined;
+    const key = request.headers['idempotency-key'];
+    const reply = await automationRoute(method,url,body,typeof key === 'string' ? key : undefined,context.automation);
+    sendJson(response,reply.status,reply.body);
+    return;
   }
 
   // 重启检测只返回当前版本和进程令牌，不等待 Codex 模型发现或账号初始化。
