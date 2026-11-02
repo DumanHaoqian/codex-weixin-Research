@@ -1104,3 +1104,5 @@ input, select, textarea, .chat-composer textarea { border-width: 4px; }
 @keyframes codex-loading-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .codex-loading-spinner { animation: none; } }
 @media (max-width: 767px) { .codex-loading-notice { padding: 12px; align-items: flex-start; gap: 12px; } }
+
+.automation-link { display:inline-flex;align-items:center;justify-content:center;text-decoration:none; }

@@ -69,12 +69,14 @@ export class TaskService {
     return decode(row);
   }
 
-  create(owner: Owner, requestKey: string, input: TaskInput, draft = false): Promise<Task> {
+  create(owner: Owner, requestKey: string, input: TaskInput, draft = false, sourceFingerprint?:string): Promise<Task> {
     return this.serialize(async () => {
       await this.authorized(owner);
       z.string().min(1).max(300).parse(requestKey);
       const definition = taskSchema.parse(input);
-      const hash = crypto.createHash('sha256').update(JSON.stringify({ definition, draft })).digest('hex');
+      // Trusted ingress may fingerprint the original relative-time request instead
+      // of its clock-dependent resolution. HTTP clients cannot choose this field.
+      const hash = crypto.createHash('sha256').update(JSON.stringify(sourceFingerprint===undefined?{definition,draft}:{sourceFingerprint,draft})).digest('hex');
       const existing = (await this.store.all('SELECT * FROM requests WHERE account_id=? AND sender_id=? AND request_key=?',
         [owner.accountId, owner.senderId, requestKey]))[0];
       if (existing) {
@@ -139,23 +141,48 @@ export class TaskService {
         try { await this.options.validateActivation?.(task.definition); }
         catch { bindingValid = false; }
         const scheduled = task.nextDue!;
-        const next = nextAfter(task.definition.schedule, now);
         const state = !allowed || !bindingValid ? 'blocked' : now - scheduled > 300_000 ? 'missed' : task.definition.kind !== 'reminder' ? 'blocked' : 'succeeded';
-        const occurrence = crypto.randomUUID(), run = crypto.randomUUID(), event = crypto.randomUUID();
-        const statements: Statement[] = [
-          { sql: 'INSERT INTO occurrences VALUES (?,?,?,?,?,?)', params: [occurrence,task.id,task.revision,scheduled,String(scheduled),state] },
-          { sql: 'INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)', params: [run,task.id,occurrence,task.revision,state,JSON.stringify(task.definition),scheduled+300_000,now,now,JSON.stringify({ text:task.definition.prompt,scheduledAt:scheduled,observedAt:now })] },
-          { sql: 'UPDATE tasks SET next_due=?,state=?,updated_at=? WHERE id=?', params: [next,next===null?'completed':'active',now,task.id] }
-        ];
-        if (allowed && task.definition.notification !== 'muted') {
-          const content = state === 'succeeded' ? task.definition.prompt : `Task ${task.id}: ${state}`;
-          statements.push(
-            { sql: 'INSERT INTO events VALUES (?,?,?,?,?,?)', params: [event,task.id,`${task.id}:${task.revision}:${scheduled}`,state,JSON.stringify({run,content}),now] },
-            { sql: 'INSERT INTO notifications VALUES (?,?,?,?,?,?,?)', params: [crypto.randomUUID(),event,task.owner.accountId,task.owner.senderId,'pending',content,now] }
-          );
-        }
-        await this.store.transaction(statements);
+        await this.recordRun(task,scheduled,String(scheduled),now,state,allowed,true);
       }
     });
+  }
+
+  runNow(owner:Owner,id:string,requestKey:string):Promise<{id:string;state:string}>{return this.serialize(async()=>{
+    const task=await this.get(owner,id);
+    z.string().min(1).max(200).parse(requestKey);
+    const key=`manual:${id}:${requestKey}`;
+    const hash=crypto.createHash('sha256').update(`${id}:${task.revision}`).digest('hex');
+    const existing=(await this.store.all('SELECT * FROM requests WHERE account_id=? AND sender_id=? AND request_key=?',[owner.accountId,owner.senderId,key]))[0];
+    if(existing){if(existing.payload_hash!==hash)throw new Error('Idempotency conflict');return JSON.parse(String(existing.response));}
+    if(task.state==='deleted')throw new Error('Task is deleted');
+    if(task.definition.kind!=='reminder')throw new Error('Capability unavailable: agent/research adapter is not verified');
+    await this.options.validateActivation?.(task.definition);
+    const now=this.now(),run=crypto.randomUUID();
+    const result={id:run,state:'succeeded'};
+    await this.recordRun(task,now,`manual:${requestKey}`,now,result.state,true,false,run,[{
+      sql:'INSERT INTO requests VALUES (?,?,?,?,?)',params:[owner.accountId,owner.senderId,key,hash,JSON.stringify(result)]
+    }]);
+    return result;
+  });}
+
+  private async recordRun(task:Task,scheduled:number,source:string,now:number,state:string,notify:boolean,advance:boolean,
+    run=crypto.randomUUID(),extra:Statement[]=[]):Promise<void>{
+    const occurrence=crypto.randomUUID(),event=crypto.randomUUID();
+    const statements:Statement[]=[
+      {sql:'INSERT INTO occurrences VALUES (?,?,?,?,?,?)',params:[occurrence,task.id,task.revision,scheduled,source,state]},
+      {sql:'INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)',params:[run,task.id,occurrence,task.revision,state,JSON.stringify(task.definition),scheduled+300_000,now,now,JSON.stringify({text:task.definition.prompt,scheduledAt:scheduled,observedAt:now})]}
+    ];
+    if(advance){
+      const next=nextAfter(task.definition.schedule,now);
+      statements.push({sql:'UPDATE tasks SET next_due=?,state=?,updated_at=? WHERE id=?',params:[next,next===null?'completed':'active',now,task.id]});
+    }
+    if(notify&&task.definition.notification!=='muted'){
+      const content=state==='succeeded'?task.definition.prompt:`Task ${task.id}: ${state}`;
+      statements.push(
+        {sql:'INSERT INTO events VALUES (?,?,?,?,?,?)',params:[event,task.id,`${task.id}:${task.revision}:${source}`,state,JSON.stringify({run,content}),now]},
+        {sql:'INSERT INTO notifications VALUES (?,?,?,?,?,?,?)',params:[crypto.randomUUID(),event,task.owner.accountId,task.owner.senderId,'pending',content,now]}
+      );
+    }
+    await this.store.transaction([...statements,...extra]);
   }
 }

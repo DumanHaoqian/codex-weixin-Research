@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { automationCapabilities } from '../automation/capabilities.js';
 import type { AutomationRuntime } from '../automation/runtime.js';
 import { ownerSchema, taskSchema } from '../automation/tasks.js';
+import { nextAfter, resolveWallTime, scheduleSchema } from '../automation/calendar.js';
 
 export type AutomationReply={status:number;body:unknown};
 
@@ -14,6 +15,17 @@ export async function automationRoute(method:string,url:URL,body:unknown,key:str
   if (!runtime) return {status:503,body:{error:'automation_disabled'}};
   try {
     const owner=ownerSchema.parse({accountId:url.searchParams.get('accountId'),senderId:url.searchParams.get('senderId')});
+    if(method==='POST'&&(route==='/resolve-time'||route==='/preview')){
+      await runtime.tasks.list(owner);
+      if(route==='/resolve-time'){
+        const input=z.object({local:z.string().max(40),timezone:z.string().max(100)}).strict().parse(body);
+        try{return {status:200,body:{atUtc:resolveWallTime(input.local,input.timezone)}};}
+        catch{return {status:422,body:{error:'当地时间不存在、存在歧义或时区无效，请选择明确时刻。'}};}
+      }
+      const schedule=scheduleSchema.parse(body);let cursor=Date.now();const times=[];
+      for(let i=0;i<3;i++){const next=nextAfter(schedule,cursor);if(next===null)break;times.push(new Date(next).toISOString());cursor=next;}
+      return {status:200,body:{times}};
+    }
     // TaskService verifies this requested owner against the live account directory;
     // query parameters are never treated as caller authorization.
     if (route==='/tasks' && method==='GET') return {status:200,body:{tasks:await runtime.tasks.list(owner)}};
@@ -22,7 +34,15 @@ export async function automationRoute(method:string,url:URL,body:unknown,key:str
       if (!key) return {status:400,body:{error:'Idempotency-Key required'}};
       return {status:201,body:{task:await runtime.tasks.create(owner,key,input.definition,input.draft)}};
     }
-    const match=/^\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume))?$/.exec(route);
+    const resend=/^\/notifications\/([a-f0-9-]{36})\/resend$/.exec(route);
+    if(method==='POST'&&resend){
+      if(!runtime.delivery)return {status:503,body:{error:'Delivery port unavailable'}};
+      if(!key)return {status:400,body:{error:'Idempotency-Key required'}};
+      const options=z.object({includeUnknown:z.boolean().optional(),resendAccepted:z.boolean().optional()}).strict().parse(body??{});
+      await runtime.delivery.retry(owner,resend[1],options,key);runtime.wake(owner);
+      return {status:202,body:{queued:true}};
+    }
+    const match=/^\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume|run))?$/.exec(route);
     if (match) {
       if (method==='GET'&&!match[2]) return {status:200,body:{task:await runtime.tasks.get(owner,match[1])}};
       if (method==='PATCH'&&!match[2]) {
@@ -30,6 +50,11 @@ export async function automationRoute(method:string,url:URL,body:unknown,key:str
         return {status:200,body:{task:await runtime.tasks.update(owner,match[1],input.expectedRevision,input.definition)}};
       }
       if (method==='DELETE'&&!match[2]) return {status:200,body:{task:await runtime.tasks.setState(owner,match[1],'delete')}};
+      if(method==='POST'&&match[2]==='run'){
+        if(!key)return {status:400,body:{error:'Idempotency-Key required'}};
+        const run=await runtime.tasks.runNow(owner,match[1],key);runtime.wake(owner);
+        return {status:201,body:{run}};
+      }
       if (method==='POST'&&match[2]) return {status:200,body:{task:await runtime.tasks.setState(owner,match[1],match[2] as 'pause'|'resume')}};
     }
     if (method==='GET'&&(route==='/runs'||route==='/notifications')) {
@@ -43,7 +68,7 @@ export async function automationRoute(method:string,url:URL,body:unknown,key:str
   } catch(error) {
     if (error instanceof z.ZodError) return {status:400,body:{error:'Invalid automation request',issues:error.issues}};
     const message=error instanceof Error ? error.message : String(error);
-    const status=/Access denied/.test(message)?403:/not found/.test(message)?404:/conflict/.test(message)?409:/unavailable|not.*verified/.test(message)?503:/past|deleted|limit|binding/.test(message)?422:500;
+    const status=/Access denied/.test(message)?403:/not found/.test(message)?404:/conflict|explicit|cancelled/.test(message)?409:/unavailable|not.*verified/.test(message)?503:/past|deleted|limit|binding/.test(message)?422:500;
     // Internal database/OS errors must not reveal file paths or SQL to clients.
     return {status,body:{error:status===500?'Automation operation failed':message}};
   }

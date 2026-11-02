@@ -27,6 +27,7 @@ import {
 import { WeixinApiClient, WeixinApiError } from "../weixin/api.js";
 import type { DeliveryOutcome } from "../automation/delivery.js";
 import type { Owner } from "../automation/tasks.js";
+import type { NormalizedWeixinMessage } from "../weixin/messages.js";
 import { monitorWeixin, type MonitorOptions } from "../weixin/monitor.js";
 import { inferMediaKind, sanitizeFileName } from "../weixin/media.js";
 
@@ -86,6 +87,7 @@ type RuntimeEntry = {
 };
 
 export type AccountManagerOptions = {
+  onAutomationMessage?: (accountId:string,message:NormalizedWeixinMessage)=>Promise<string|undefined>;
   paths: StatePaths;
   configProvider?: () => CodexWeixinConfig;
   clientFactory?: (account: WeixinAccount) => WeixinApiClient;
@@ -188,6 +190,7 @@ export class AccountManager {
       inboundDir: statePaths.inboundDir,
       runner: this.runnerFor(config),
       listCodexModels: () => this.getCodexModels(),
+      onAutomationMessage:(message)=>this.options.onAutomationMessage?.(account.accountId,message)??Promise.resolve(undefined),
       onTurnStatus: ({ sessionId, active }) => this.setSessionResponding(account.accountId, sessionId, active)
     });
     const entry: RuntimeEntry = { status: "starting", controller, service, store };

@@ -17,6 +17,11 @@ export const scheduleSchema = z.discriminatedUnion('kind', [
 ]);
 export type ScheduleSpec = z.infer<typeof scheduleSchema>;
 
+export function resolveWallTime(local:string,timezone:string):string{
+  const dateTime=Temporal.PlainDateTime.from(local);
+  return dateTime.toZonedDateTime(timezone,{disambiguation:'reject'}).toInstant().toString();
+}
+
 // Strictly after the cursor. Wall-clock recurrences skip gaps and use the first fold.
 export function nextAfter(input: ScheduleSpec, afterMs: number): number | null {
   const spec = scheduleSchema.parse(input);

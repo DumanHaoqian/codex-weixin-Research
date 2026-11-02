@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>定时与科研 · Codex 微信</title>
+  <link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/automation.css">
+  <script defer src="/automation.js"></script>
+</head>
+<body>
+  <header><a href="/">← 微信工作台</a><span>CODEX / RESEARCH</span></header>
+  <main>
+    <div class="heading"><div><p class="eyebrow">AUTOMATIONS</p><h1>定时与科研</h1><p>把明确的计划交给后台，执行记录始终可查。</p></div><button id="refresh" type="button">刷新</button></div>
+    <p id="status" class="notice" role="status">正在检查调度服务…</p>
+    <p id="message" role="status" aria-live="polite"></p>
+    <section class="toolbar" aria-label="任务所有者">
+      <label>微信账号<select id="account"></select></label><label>接收人<select id="sender"></select></label>
+      <p>任务仅发给所选账号的已授权接收人。</p>
+    </section>
+    <div class="layout">
+      <section class="panel"><div class="panel-heading"><h2 id="form-title">新建提醒</h2><button type="button" id="reset">清空</button></div>
+        <form id="task-form">
+          <label>名称<input id="title" maxlength="120" required placeholder="例：检查今晚实验结果"></label>
+          <label>提醒内容<textarea id="prompt" rows="4" maxlength="32000" required placeholder="到点后发给我的内容"></textarea></label>
+          <div class="fields"><label>重复方式<select id="schedule"><option value="once">一次性</option><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">固定间隔</option></select></label>
+            <label>时区<input id="timezone" value="Asia/Shanghai" required></label></div>
+          <label id="once-field">日期与时间<input id="at" type="datetime-local" required></label>
+          <label id="time-field" hidden>当地时间<input id="time" type="time" value="09:00"></label>
+          <fieldset id="week-field" hidden><legend>星期</legend><div class="weekdays">
+            <label><input type="checkbox" name="weekday" value="1" checked>一</label><label><input type="checkbox" name="weekday" value="2">二</label><label><input type="checkbox" name="weekday" value="3">三</label><label><input type="checkbox" name="weekday" value="4">四</label><label><input type="checkbox" name="weekday" value="5">五</label><label><input type="checkbox" name="weekday" value="6">六</label><label><input type="checkbox" name="weekday" value="7">日</label>
+          </div></fieldset>
+          <label id="interval-field" hidden>每隔多少分钟<input id="interval" type="number" min="5" max="525600" value="30"></label>
+          <label>通知<select id="notification"><option value="always">执行后通知我</option><option value="muted">仅保留记录</option></select></label>
+          <div class="actions"><button id="save" class="primary" type="submit">保存提醒</button><button id="preview" type="button">预览时间</button></div>
+          <p id="preview-times" class="muted"></p>
+        </form>
+      </section>
+      <section class="panel"><div class="panel-heading"><h2>任务</h2><span id="task-count" class="muted"></span></div><div id="tasks" aria-live="polite"></div></section>
+    </div>
+    <section class="panel records"><div class="panel-heading"><h2>执行与通知</h2><span class="muted">最近 100 条</span></div>
+      <p class="muted">“API 已接受”表示微信接口接受请求，实际送达尚未确认。重发未知或已接受的消息可能重复；重发不会重新执行任务。</p>
+      <label class="duplicate-option"><input id="allow-duplicate" type="checkbox">允许重发未知或已接受的通知（可能重复）</label>
+      <div class="records-grid"><div><h3>执行记录</h3><div id="runs"></div></div><div><h3>通知</h3><div id="notifications"></div></div></div>
+    </section>
+    <details class="panel"><summary>当前支持范围与服务设置</summary><p>当前支持提醒调度及微信投递。模型执行、科研作业、GPU 和文献任务尚未启用。</p><p>需使用本分支构建运行，并设置 <code>CODEX_WEIXIN_AUTOMATION=1</code> 后重启该服务。关闭网页不影响调度；电脑关机或退出桥接后，本地计划不能执行。超过 5 分钟的普通漏跑不会自动补跑。</p><p>微信也可使用 <code>/tasks help</code>，或发送“30分钟后提醒我检查结果”。</p></details>
+  </main>
+</body>
+</html>

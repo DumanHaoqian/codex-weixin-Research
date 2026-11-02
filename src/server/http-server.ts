@@ -171,7 +171,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       : undefined;
     const basicAuthenticated = suppliedDigest && crypto.timingSafeEqual(suppliedDigest, context.authDigest);
     if (!basicAuthenticated && !hasValidAuthSession(request, context.authSessionKey)) {
-      if (method === "GET" && ["/", "/index.html"].includes(url.pathname)) {
+      if (method === "GET" && ["/", "/index.html", "/automation.html"].includes(url.pathname)) {
         serveStatic(response, "/login.html");
       } else {
         sendJson(response, 401, { error: "Authentication required" });
@@ -506,6 +506,9 @@ function serveStatic(response: ServerResponse, pathname: string): void {
     "/login.js": { name: "login.js", type: "text/javascript; charset=utf-8" },
     "/": { name: "index.html", type: "text/html; charset=utf-8" },
     "/index.html": { name: "index.html", type: "text/html; charset=utf-8" },
+    "/automation.html": { name: "automation.html", type: "text/html; charset=utf-8" },
+    "/automation.js": { name: "automation.js", type: "text/javascript; charset=utf-8" },
+    "/automation.css": { name: "automation.css", type: "text/css; charset=utf-8" },
     "/favicon.ico": { name: "favicon.svg", type: "image/svg+xml" },
     "/favicon.svg": { name: "favicon.svg", type: "image/svg+xml" },
     "/logo.png": { name: "logo.png", type: "image/png" },

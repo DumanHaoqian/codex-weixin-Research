@@ -17,6 +17,7 @@ import { launchRestartHelper } from "./restart.js";
 import { startRestartControl, stopService } from "./restart-control.js";
 import { isCurrentRuntimeInstallable, UpdateManager } from "./update-manager.js";
 import { AutomationRuntime } from "../automation/runtime.js";
+import { handleWeixinAutomation } from "../automation/weixin-commands.js";
 
 async function main(): Promise<void> {
   const launchCwd = process.cwd();
@@ -30,8 +31,10 @@ async function main(): Promise<void> {
     fs.mkdirSync(configuredWorkspace, { recursive: true });
   }
   const processLock = acquireServiceProcessLock(paths.root);
-  const accountManager = new AccountManager({ paths });
   let automation: AutomationRuntime | undefined;
+  const accountManager = new AccountManager({ paths,
+    onAutomationMessage:(accountId,message)=>handleWeixinAutomation(automation,{accountId,senderId:message.senderId},message)
+  });
   let server: Awaited<ReturnType<typeof startLocalHttpServer>> | undefined;
   let restartControl: Awaited<ReturnType<typeof startRestartControl>> | undefined;
   let shutdownPromise: Promise<void> | undefined;

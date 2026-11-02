@@ -59,7 +59,9 @@ test('unknown delivery is never automatically replayed, even after fresh inbound
     await worker.flush();await worker.flush();await worker.wake(owner);assert.equal(calls,1);
     assert.equal((await store.all('SELECT state FROM notifications'))[0].state,'unknown');
     await assert.rejects(worker.retry(owner,id),/includeUnknown/);
-    await worker.retry(owner,id,{includeUnknown:true});await worker.flush();assert.equal(calls,2);
+    await worker.retry(owner,id,{includeUnknown:true},'retry');await worker.flush();assert.equal(calls,2);
+    await worker.retry(owner,id,{includeUnknown:true},'retry');await worker.flush();assert.equal(calls,2);
+    await assert.rejects(worker.retry(owner,id,{resendAccepted:true},'retry'),/conflict/);
   }finally{await store.close();}
 });
 

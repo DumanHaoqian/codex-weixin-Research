@@ -17,6 +17,7 @@ import type { PromptBufferItem } from "./prompt-buffer.js";
 const PENDING_SPLIT_TIMEOUT_MS = 10 * 60_000;
 
 export type BridgeServiceOptions = {
+  onAutomationMessage?: (message: NormalizedWeixinMessage) => Promise<string | undefined>;
   config: CodexWeixinConfig;
   stateStore: RuntimeStateStore;
   weixin: WeixinApiClient;
@@ -73,6 +74,12 @@ export class BridgeService {
     }
     this.options.stateStore.setPairedSenderIds(this.access.listPairedSenderIds());
     this.options.stateStore.ensureActiveSession(message.senderId, this.options.config.defaultCwd);
+
+    const automationReply = await this.options.onAutomationMessage?.(message);
+    if (automationReply !== undefined) {
+      for (const chunk of chunkText(automationReply)) await this.reply(message.senderId,chunk);
+      return;
+    }
 
     const command = parseCommand(message.text);
     if (command) {

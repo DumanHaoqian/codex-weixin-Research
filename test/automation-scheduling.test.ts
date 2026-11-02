@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { nextAfter } from '../src/automation/calendar.js';
+import { nextAfter, resolveWallTime } from '../src/automation/calendar.js';
 import { AutomationStore } from '../src/automation/store.js';
 import { TaskService, type TaskInput } from '../src/automation/tasks.js';
 
@@ -12,6 +12,9 @@ function reminder(at: number): TaskInput {
 }
 
 test('calendar skips DST gaps and never fires the second folded hour', () => {
+  assert.equal(resolveWallTime('2026-11-03T09:00','Asia/Shanghai'),'2026-11-03T01:00:00Z');
+  assert.throws(()=>resolveWallTime('2026-03-08T02:30','America/New_York'));
+  assert.throws(()=>resolveWallTime('2026-11-01T01:30','America/New_York'));
   const zone = 'America/New_York';
   assert.equal(new Date(nextAfter({ kind:'daily',time:'02:30',timezone:zone }, Date.parse('2026-03-08T00:00:00Z'))!).toISOString(), '2026-03-09T06:30:00.000Z');
   assert.equal(new Date(nextAfter({ kind:'daily',time:'01:30',timezone:zone }, Date.parse('2026-11-01T05:00:00Z'))!).toISOString(), '2026-11-01T05:30:00.000Z');

@@ -78,8 +78,15 @@ export class NotificationWorker {
     }
   });}
 
-  retry(owner:Owner,id:string,options:{includeUnknown?:boolean;resendAccepted?:boolean}={}):Promise<void>{return this.serialize(async()=>{
+  retry(owner:Owner,id:string,options:{includeUnknown?:boolean;resendAccepted?:boolean}={},requestKey?:string):Promise<void>{return this.serialize(async()=>{
     if(!await this.authorize(owner))throw new Error('Access denied');
+    if(requestKey!==undefined&&(!requestKey.length||requestKey.length>200))throw new Error('Invalid request key');
+    const key=`retry:${id}:${requestKey}`;
+    const hash=crypto.createHash('sha256').update(JSON.stringify({id,includeUnknown:Boolean(options.includeUnknown),resendAccepted:Boolean(options.resendAccepted)})).digest('hex');
+    if(requestKey!==undefined){
+      const old=(await this.store.all('SELECT payload_hash FROM requests WHERE account_id=? AND sender_id=? AND request_key=?',[owner.accountId,owner.senderId,key]))[0];
+      if(old){if(old.payload_hash!==hash)throw new Error('Idempotency conflict');return;}
+    }
     const n=(await this.store.all('SELECT * FROM notifications WHERE id=? AND account_id=? AND sender_id=?',[id,owner.accountId,owner.senderId]))[0];
     if(!n)throw new Error('Notification not found');
     if(n.state==='cancelled')throw new Error('Notification cancelled');
@@ -88,7 +95,8 @@ export class NotificationWorker {
     const states=["'failed'","'waiting_context'",...(options.includeUnknown?["'unknown'"]:[]),...(options.resendAccepted?["'api_accepted'"]:[])];
     await this.store.transaction([
       {sql:`UPDATE notification_parts SET state='pending' WHERE notification_id=? AND state IN (${states.join(',')})`,params:[id]},
-      {sql:"UPDATE notifications SET state='pending',updated_at=? WHERE id=? AND state!='cancelled'",params:[this.now(),id]}
+      {sql:"UPDATE notifications SET state='pending',updated_at=? WHERE id=? AND state!='cancelled'",params:[this.now(),id]},
+      ...(requestKey===undefined?[]:[{sql:'INSERT INTO requests VALUES (?,?,?,?,?)',params:[owner.accountId,owner.senderId,key,hash,'{}']}])
     ]);
   });}
 
