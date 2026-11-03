@@ -1,6 +1,17 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const state={token:'',accounts:[],allowlist:[],tasks:[],edit:null,busy:false,enabled:false,generation:0,keys:new Map(),intervalAnchor:null};
+const pages={};
+function resetPages(){for(const name of ['tasks','runs','notifications'])pages[name]={cursor:null,next:null,back:[]};}
+resetPages();
+function pagination(){
+  for(const [name,page] of Object.entries(pages)){
+    const previous=button('上一页',async()=>{page.cursor=page.back.pop()??null;await refresh();});
+    const next=button('下一页',async()=>{page.back.push(page.cursor);page.cursor=page.next;await refresh();});
+    previous.disabled=state.busy||!page.back.length;next.disabled=state.busy||!page.next;
+    $(`${name}-pages`).replaceChildren(previous,el('span',`第 ${page.back.length+1} 页`,'muted'),next);
+  }
+}
 const labels={active:'运行中',paused:'已暂停',completed:'计划已耗尽',draft:'草稿',deleted:'已删除',
   succeeded:'执行成功',blocked:'受阻',missed:'漏跑',pending:'待投递',failed:'已拒绝/失败',unknown:'结果未知',cancelled:'已取消',api_accepted:'API 已接受 · 送达未确认'};
 function el(tag,text,cls){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(cls)node.className=cls;return node;}
@@ -35,11 +46,13 @@ function syncFields(){
   $('time-field').hidden=!['daily','weekly'].includes(kind);$('week-field').hidden=kind!=='weekly';$('interval-field').hidden=kind!=='interval';
   $('save').disabled=!state.enabled||!$('sender').value;
   $('preview').disabled=!state.enabled||!$('sender').value;
+  pagination();
 }
 function reset(){
   state.edit=null;state.intervalAnchor=null;$('task-form').reset();$('form-title').textContent='新建提醒';$('save').textContent='保存提醒';$('preview-times').textContent='';syncFields();
 }
 function chooseSenders(){
+  resetPages();
   const prior=$('sender').value;
   const account=state.accounts.find(a=>a.accountId===$('account').value);
   const senders=[...new Set([...(account?.pairedSenderIds||[]),...state.allowlist])];
@@ -74,7 +87,7 @@ function edit(task){
   $('preview-times').textContent='';syncFields();$('title').focus();
 }
 function renderTasks(tasks){
-  state.tasks=tasks;const visible=tasks.filter(t=>t.state!=='deleted');$('task-count').textContent=`${visible.length} 项`;
+  state.tasks=tasks;const visible=tasks.filter(t=>t.state!=='deleted');$('task-count').textContent=`本页 ${visible.length} 项`;
   $('tasks').replaceChildren();
   if(!visible.length){$('tasks').append(el('p','还没有任务。从左侧创建一条提醒。','empty'));return;}
   for(const task of visible){
@@ -117,9 +130,11 @@ async function refresh(){
   if(!runtime.enabled||!$('account').value||!$('sender').value){
     $('tasks').replaceChildren(el('p','请选择已启用账号的授权接收人。','empty'));$('runs').replaceChildren();$('notifications').replaceChildren();return;
   }
-  const [tasks,runs,notifications]=await Promise.all(['/tasks','/runs','/notifications'].map(route=>request(route,'GET',undefined,ownerScope)));
+  const [tasks,runs,notifications]=await Promise.all(['tasks','runs','notifications'].map(name=>
+    request(`/${name}`,'GET',undefined,ownerScope+'&limit=50'+(pages[name].cursor?'&cursor='+encodeURIComponent(pages[name].cursor):''))));
   if(generation!==state.generation||ownerScope!==scope())return;
-  renderTasks(tasks.tasks);renderRecords(runs.items,notifications.items);
+  for(const [name,value] of [['tasks',tasks],['runs',runs],['notifications',notifications]])pages[name].next=value.nextCursor;
+  renderTasks(tasks.tasks);renderRecords(runs.items,notifications.items);pagination();
 }
 async function definition(forSave=false){
   const timezone=$('timezone').value.trim(),kind=$('schedule').value;
@@ -145,7 +160,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   $('schedule').addEventListener('change',syncFields);
   $('reset').addEventListener('click',reset);
   $('account').addEventListener('change',()=>{chooseSenders();void refresh().catch(e=>message(e.message,true));});
-  $('sender').addEventListener('change',()=>{reset();void refresh().catch(e=>message(e.message,true));});
+  $('sender').addEventListener('change',()=>{resetPages();reset();void refresh().catch(e=>message(e.message,true));});
   $('refresh').addEventListener('click',()=>action(async()=>{await bootstrap();await refresh();}));
   $('preview').addEventListener('click',()=>action(async()=>{
     const def=await definition();const reply=await request('/preview','POST',def.schedule);

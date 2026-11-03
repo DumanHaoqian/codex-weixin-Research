@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import { nextAfter, scheduleSchema } from './calendar.js';
 import { AutomationStore, type Row, type Statement } from './store.js';
+import { historyPage, type HistoryKind, type PageInput } from './history.js';
 
 export const ownerSchema = z.object({ accountId: z.string().min(1).max(200), senderId: z.string().min(1).max(200) }).strict();
 export type Owner = z.infer<typeof ownerSchema>;
@@ -40,7 +41,7 @@ export class TaskService {
     return result;
   }
 
-  private async authorized(owner: Owner): Promise<void> {
+  async authorized(owner: Owner): Promise<void> {
     ownerSchema.parse(owner);
     if (!await this.options.authorize(owner)) throw new Error('Access denied');
   }
@@ -59,6 +60,22 @@ export class TaskService {
     await this.authorized(owner);
     return (await this.store.all('SELECT * FROM tasks WHERE account_id=? AND sender_id=? ORDER BY created_at DESC',
       [owner.accountId, owner.senderId])).map(decode);
+  }
+
+  async page(owner: Owner, kind: HistoryKind, input: PageInput = {}) {
+    await this.authorized(owner);
+    return historyPage(this.store, owner, kind, input);
+  }
+
+  private async replay<T>(owner: Owner, key: string | undefined, payload: unknown): Promise<{ response?: T; record: (response: T) => Statement[] }> {
+    if (key === undefined) return { record: () => [] };
+    z.string().min(1).max(200).parse(key);
+    const requestKey = `task-mutation:${key}`;
+    const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    const existing = (await this.store.all('SELECT * FROM requests WHERE account_id=? AND sender_id=? AND request_key=?', [owner.accountId, owner.senderId, requestKey]))[0];
+    if (existing && existing.payload_hash !== hash) throw new Error('Idempotency conflict');
+    return { response: existing ? JSON.parse(String(existing.response)) as T : undefined,
+      record: response => [{ sql: 'INSERT INTO requests VALUES (?,?,?,?,?)', params: [owner.accountId, owner.senderId, requestKey, hash, JSON.stringify(response)] }] };
   }
 
   async get(owner: Owner, id: string): Promise<Task> {
@@ -97,36 +114,45 @@ export class TaskService {
     });
   }
 
-  update(owner: Owner, id: string, revision: number, input: TaskInput): Promise<Task> {
+  update(owner: Owner, id: string, revision: number | undefined, input: TaskInput, requestKey?: string): Promise<Task> {
     return this.serialize(async () => {
-      const task = await this.get(owner,id);
-      if (task.revision !== revision) throw new Error('Revision conflict');
-      if (task.state === 'deleted') throw new Error('Task is deleted');
+      await this.authorized(owner);
       const definition = taskSchema.parse(input);
+      const replay = await this.replay<Task>(owner,requestKey,{action:'update',id,revision,definition});
+      if (replay.response) return replay.response;
+      const task = await this.get(owner,id);
+      if (revision !== undefined && task.revision !== revision) throw new Error('Revision conflict');
+      revision ??= task.revision;
+      if (task.state === 'deleted') throw new Error('Task is deleted');
       const now = this.now();
       const next = task.state === 'active' ? await this.activation(definition,now) : null;
+      const updated: Task = {...task, definition, revision:revision+1, nextDue:next};
       await this.store.transaction([
         { sql: 'UPDATE tasks SET definition=?,revision=?,next_due=?,updated_at=? WHERE id=?', params: [JSON.stringify(definition),revision+1,next,now,id] },
-        { sql: 'INSERT INTO revisions VALUES (?,?,?)', params: [id,revision+1,JSON.stringify(definition)] }
+        { sql: 'INSERT INTO revisions VALUES (?,?,?)', params: [id,revision+1,JSON.stringify(definition)] },
+        ...replay.record(updated)
       ]);
-      return this.get(owner,id);
+      return updated;
     });
   }
 
-  setState(owner: Owner, id: string, action: 'pause'|'resume'|'delete'): Promise<Task> {
+  setState(owner: Owner, id: string, action: 'pause'|'resume'|'delete', requestKey?: string): Promise<Task> {
     return this.serialize(async () => {
+      await this.authorized(owner);
+      const replay = await this.replay<Task>(owner,requestKey,{action,id});
+      if (replay.response) return replay.response;
       const task = await this.get(owner,id);
-      if (task.state === 'deleted') { if (action === 'delete') return task; throw new Error('Task is deleted'); }
+      if (task.state === 'deleted' && action !== 'delete') throw new Error('Task is deleted');
       const state = action === 'pause' ? 'paused' : action === 'resume' ? 'active' : 'deleted';
-      if (state === 'active' && task.state === 'active') return task;
-      if (state === 'active' && (await this.store.all("SELECT id FROM tasks WHERE account_id=? AND state='active'", [owner.accountId])).length >= 20)
+      if (state === 'active' && task.state !== 'active' && (await this.store.all("SELECT id FROM tasks WHERE account_id=? AND state='active'", [owner.accountId])).length >= 20)
         throw new Error('Active task limit exceeded');
       const now = this.now();
-      const next = state === 'active' ? await this.activation(task.definition,now) : null;
+      const next = state === 'active' ? task.state === 'active' ? task.nextDue : await this.activation(task.definition,now) : null;
       const statements: Statement[] = [{ sql: 'UPDATE tasks SET state=?,next_due=?,updated_at=? WHERE id=?', params: [state,next,now,id] }];
       if (state === 'deleted') statements.push({ sql: "UPDATE notifications SET state='cancelled',updated_at=? WHERE event_id IN (SELECT id FROM events WHERE task_id=?) AND state IN ('pending','failed')", params: [now,id] });
-      await this.store.transaction(statements);
-      return this.get(owner,id);
+      const updated:Task = {...task,state,nextDue:next};
+      await this.store.transaction([...statements,...replay.record(updated)]);
+      return updated;
     });
   }
 
@@ -151,7 +177,7 @@ export class TaskService {
     const task=await this.get(owner,id);
     z.string().min(1).max(200).parse(requestKey);
     const key=`manual:${id}:${requestKey}`;
-    const hash=crypto.createHash('sha256').update(`${id}:${task.revision}`).digest('hex');
+    const hash=crypto.createHash('sha256').update(id).digest('hex');
     const existing=(await this.store.all('SELECT * FROM requests WHERE account_id=? AND sender_id=? AND request_key=?',[owner.accountId,owner.senderId,key]))[0];
     if(existing){if(existing.payload_hash!==hash)throw new Error('Idempotency conflict');return JSON.parse(String(existing.response));}
     if(task.state==='deleted')throw new Error('Task is deleted');

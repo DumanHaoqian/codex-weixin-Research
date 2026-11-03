@@ -57,8 +57,8 @@ export async function handleWeixinAutomation(runtime:AutomationRuntime|undefined
       if(action==='run'){
         const run=await runtime.tasks.runNow(owner,id,message.id);runtime.wake(owner);return `本次运行已保存：${run.id}。原计划保持不变。`;
       }
-      if(action==='edit')return describe(await runtime.tasks.update(owner,id,task.revision,JSON.parse(args.slice(id.length).trim())));
-      return describe(await runtime.tasks.setState(owner,id,action as 'pause'|'resume'|'delete'));
+      if(action==='edit')return describe(await runtime.tasks.update(owner,id,undefined,JSON.parse(args.slice(id.length).trim()),message.id));
+      return describe(await runtime.tasks.setState(owner,id,action as 'pause'|'resume'|'delete',message.id));
     }
     const timezone='Asia/Shanghai';let definition:TaskInput;
     const prefix={kind:'reminder' as const,title:'微信提醒'};

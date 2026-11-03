@@ -34,12 +34,12 @@
           <p id="preview-times" class="muted"></p>
         </form>
       </section>
-      <section class="panel"><div class="panel-heading"><h2>任务</h2><span id="task-count" class="muted"></span></div><div id="tasks" aria-live="polite"></div></section>
+      <section class="panel"><div class="panel-heading"><h2>任务</h2><span id="task-count" class="muted"></span></div><div id="tasks" aria-live="polite"></div><nav id="tasks-pages" class="actions" aria-label="任务分页"></nav></section>
     </div>
-    <section class="panel records"><div class="panel-heading"><h2>执行与通知</h2><span class="muted">最近 100 条</span></div>
+    <section class="panel records"><div class="panel-heading"><h2>执行与通知</h2><span class="muted">每页 50 条，可翻页查看历史</span></div>
       <p class="muted">“API 已接受”表示微信接口接受请求，实际送达尚未确认。重发未知或已接受的消息可能重复；重发不会重新执行任务。</p>
       <label class="duplicate-option"><input id="allow-duplicate" type="checkbox">允许重发未知或已接受的通知（可能重复）</label>
-      <div class="records-grid"><div><h3>执行记录</h3><div id="runs"></div></div><div><h3>通知</h3><div id="notifications"></div></div></div>
+      <div class="records-grid"><div><h3>执行记录</h3><div id="runs"></div><nav id="runs-pages" class="actions" aria-label="执行记录分页"></nav></div><div><h3>通知</h3><div id="notifications"></div><nav id="notifications-pages" class="actions" aria-label="通知分页"></nav></div></div>
     </section>
     <details class="panel"><summary>当前支持范围与服务设置</summary><p>当前支持提醒调度及微信投递。模型执行、科研作业、GPU 和文献任务尚未启用。</p><p>需使用本分支构建运行，并设置 <code>CODEX_WEIXIN_AUTOMATION=1</code> 后重启该服务。关闭网页不影响调度；电脑关机或退出桥接后，本地计划不能执行。超过 5 分钟的普通漏跑不会自动补跑。</p><p>微信也可使用 <code>/tasks help</code>，或发送“30分钟后提醒我检查结果”。</p></details>
   </main>
