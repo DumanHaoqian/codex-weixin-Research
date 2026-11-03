@@ -15,6 +15,7 @@ export function remoteRequest(action:RemoteAction,target:Target,owner:Owner,payl
 function verify(request:RemoteRequest,value:unknown):RemoteReceipt{
   const receipt=receiptSchema.parse(value);
   if(receipt.operationId!==request.operationId||receipt.payloadHash!==request.payloadHash||receipt.ownerScope!==request.ownerScope)throw new Error('Remote receipt identity mismatch');
+  if(typeof request.payload.objectId==='string'&&receipt.objectId!==request.payload.objectId)throw new Error('Remote object identity mismatch');
   return receipt;
 }
 export class WorkflowEngine{
@@ -45,6 +46,7 @@ export class WorkflowEngine{
   }
   scan():Promise<void>{if(this.stopped)return Promise.resolve();this.current??=this.collect().finally(()=>{this.current=undefined;});return this.current;}
   private async collect():Promise<void>{
+    const observations=new Map<string,RemoteReceipt>();
     const rows=await this.store.all(`SELECT w.*,t.account_id,t.sender_id,t.state AS task_state,r.snapshot FROM research_workflows w JOIN tasks t ON t.id=w.task_id JOIN runs r ON r.id=w.id
       WHERE w.state IN ('waiting','submitting','reserving','held','handoff','monitoring','unknown','releasing') AND w.next_check<=? ORDER BY w.next_check,w.id LIMIT 20`,[this.now()]);
     for(const candidate of rows){if(this.stopped)return;await this.exclusive(String(candidate.id),async()=>{
@@ -56,7 +58,7 @@ export class WorkflowEngine{
         if(w.data.leaseId){try{await this.invoke(remoteRequest('release',w.data.target,w.owner,{objectId:w.data.leaseId}));}catch{}}
         await this.save(w,row.task_state==='deleted'?'cancelled':'blocked','当前所有者不可用或任务已删除；未提交新实验，运行中的实验未被停止。');return;
       }
-      try{await this.step(w);}catch(error){
+      try{await this.step(w,observations);}catch(error){
         // Do not invent failure of a live job from a lost observation.
         w.data.lastObservation='unavailable';w.data.lastError=error instanceof Error?error.message.slice(0,400):'observation_failed';w.data.stableCount=0;await this.save(w,w.data.operation?'unknown':w.state,'无法核实科研流程当前状态；保留既有身份，未重新提交。',this.now()+30_000);
       }
@@ -85,6 +87,7 @@ export class WorkflowEngine{
       // the original identity; never automatically invoke submit/reserve again.
       const receipt=await this.invoke(remoteRequest('reconcile',w.data.target,w.owner,{operationId:request.operationId,originalHash:request.payloadHash}));
       if(receipt.state==='not_found')throw new Error('Original remote outcome remains unknown');
+      if(receipt.objectId!==request.payload.objectId)throw new Error('Reconciled operation object identity mismatch');
       return receipt;
     }
     request=remoteRequest(action,w.data.target,w.owner,payload);w.data.operation=request;
@@ -101,10 +104,12 @@ export class WorkflowEngine{
     if(!receipt.objectId)throw new Error('Remote object identity missing');
     if(w.data.serverId&&receipt.serverId!==w.data.serverId)throw new Error('Remote server identity changed');
     w.data.serverId=receipt.serverId;
+    const existing=(await this.store.all('SELECT o.server_id,o.kind,t.account_id,t.sender_id FROM research_objects o JOIN tasks t ON t.id=o.task_id WHERE o.id=?',[receipt.objectId]))[0];
+    if(existing&&(existing.server_id!==receipt.serverId||existing.kind!==kind||existing.account_id!==w.owner.accountId||existing.sender_id!==w.owner.senderId))throw new Error('Remote object provenance conflicts with an existing record');
     await this.store.transaction([{sql:'INSERT INTO research_objects VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,receipt=excluded.receipt,updated_at=excluded.updated_at',
       params:[receipt.objectId,w.taskId,w.id,w.data.operation?.operationId??receipt.operationId,receipt.serverId,receipt.objectId,kind,receipt.state,JSON.stringify(receipt),null,this.now(),this.now()]}]);
   }
-  private async step(w:Workflow):Promise<void>{
+  private async step(w:Workflow,observations:Map<string,RemoteReceipt>):Promise<void>{
     const spec=w.data.spec as WorkflowSpec;
     if(w.data.control){
       const control=w.data.control;delete w.data.control;
@@ -125,13 +130,16 @@ export class WorkflowEngine{
       }
       const receipt=await this.invoke(remoteRequest('reconcile',w.data.target,w.owner,{operationId:operation.operationId,originalHash:operation.payloadHash}));
       if(receipt.state==='not_found'){await this.save(w,'unknown','原操作未能核实；不会因 not_found 自动重提。',this.now()+30_000);return;}
+      if(receipt.objectId!==operation.payload.objectId)throw new Error('Reconciled object identity mismatch');
       const isLease=operation.action==='reserve';await this.object(w,receipt,isLease?'lease':'job');
       if(isLease){w.data.leaseId=receipt.objectId;w.phase='lease';}else{w.data.jobId=receipt.objectId;w.phase='monitor';}
       await this.save(w,isLease?'held':'monitoring','已核对原操作身份，继续跟踪。',this.now());return;
     }
     if(w.phase==='resources'){
       if(this.now()>=w.deadline){await this.save(w,'expired','资源等待已到期；未启动新的实验。');return;}
-      const preflight=await this.preflight(w.owner,w.data.target,spec.resource.gpuCount>0,spec.recipe);w.data.serverId=preflight.serverId;
+      const observationKey=hash({target:w.data.target,gpu:spec.resource.gpuCount>0});let preflight=observations.get(observationKey);
+      if(!preflight||this.now()-preflight.remoteNow>15000){preflight=await this.preflight(w.owner,w.data.target,spec.resource.gpuCount>0);observations.set(observationKey,preflight);}
+      w.data.serverId=preflight.serverId;
       const gpus=z.array(z.object({uuid:z.string(),totalBytes:z.number(),usedBytes:z.number(),utilization:z.number(),pids:z.array(z.number())}).passthrough()).parse(preflight.payload.gpu??[]);
       const selected=gpus.filter(g=>(!spec.resource.gpuUuids.length||spec.resource.gpuUuids.includes(g.uuid))&&g.totalBytes-g.usedBytes>=Math.max(spec.resource.minFreeBytes,spec.mode==='reserve_then_handoff'?spec.resource.holderBytes+64*1024**2:0)
         &&g.usedBytes<=spec.resource.maxUsedBytes&&g.utilization===0&&g.pids.length===0).map(g=>g.uuid).sort().slice(0,spec.resource.gpuCount);
@@ -165,7 +173,7 @@ export class WorkflowEngine{
         await this.save(w,'monitoring','已取得交接实验身份；继续核对原实验，未重复启动。',this.now()+5000);return;
       }
       if(['released','expired','failed','needs_review'].includes(receipt.state)){
-        if(['released','expired'].includes(receipt.state)&&receipt.payload.releaseVerified===true)await this.releaseClaims(w);
+        if(receipt.payload.releaseVerified===true)await this.releaseClaims(w);
         await this.save(w,receipt.state==='released'?'succeeded':receipt.state,`资源保留状态：${receipt.state}。未核实释放时保留资源声明。`);return;
       }
       if(receipt.state==='handed_off'){
@@ -202,10 +210,26 @@ export class WorkflowEngine{
         }
         await this.save(w,state,`实验进程已退出，验证状态：${state}。证据产物：${evidence.id}；缺失指标不会被报告为科研成功。`);return;
       }
-      if(['failed','needs_review'].includes(receipt.state)){await this.save(w,receipt.state,`远端作业需要处理：${receipt.state}；资源声明保留至核实释放。`);return;}
+      if(['failed','needs_review'].includes(receipt.state)){if(receipt.payload.releaseVerified===true)await this.releaseClaims(w);await this.save(w,receipt.state,`远端作业需要处理：${receipt.state}；资源声明保留至核实释放。`);return;}
       if(['not_found','unknown'].includes(receipt.state)){await this.save(w,'monitoring','作业身份或状态暂时无法核实；未把进程消失当作成功。',this.now()+30000);return;}
       await this.store.transaction([{sql:"UPDATE resource_claims SET state='job_owned' WHERE holder_id=? AND state='requesting'",params:[w.id]}]);
       let notice=w.data.lastProcessState===receipt.state?undefined:`作业状态：${receipt.state}；日志仅采样末尾，未声称检查全部日志。`;
+      const logNotices:string[]=[];
+      if(typeof receipt.payload.logBytes==='number'){
+        const bytes=receipt.payload.logBytes;
+        if(w.data.lastLogBytes===undefined||bytes!==w.data.lastLogBytes){
+          w.data.lastProgressAt=this.now();if(w.data.logStalled)logNotices.push('作业日志恢复更新。');w.data.logStalled=false;
+        }else if(spec.logStallSeconds&&this.now()-Number(w.data.lastProgressAt)>=spec.logStallSeconds*1000&&!w.data.logStalled){
+          w.data.logStalled=true;logNotices.push('日志超过保存的停滞阈值未更新；仍需核查阶段，不据此判定实验失败或停止实验。');
+        }
+        w.data.lastLogBytes=bytes;
+      }
+      w.data.logAlertsSeen??={};
+      for(const alert of spec.logAlerts??[]){
+        const match=alert==='oom'?/out of memory|CUDA_ERROR_OUT_OF_MEMORY/i.test(String(receipt.payload.logTail??'')):/\b(?:loss|grad(?:ient)?|metric)\b[^\n]{0,60}\bnan\b/i.test(String(receipt.payload.logTail??''));
+        if(match&&!w.data.logAlertsSeen[alert]){w.data.logAlertsSeen[alert]=true;logNotices.push(`有限日志末尾匹配 ${alert.toUpperCase()} 特征；需核查，未据此自动停止或重训。`);}
+      }
+      if(logNotices.length)notice=logNotices.join('\n');
       if(spec.maxRuntimeSeconds&&Number(receipt.payload.startedAt)>0&&this.now()-Number(receipt.payload.startedAt)>spec.maxRuntimeSeconds*1000&&!w.data.runtimeNotice){
         w.data.runtimeNotice=true;notice=spec.grant?.stop?'作业超过保存的时长上限；远端监督器按已授权的停止策略处理。':'作业超过保存的时长上限；没有停止授权，实验继续运行，请处理。';
       }

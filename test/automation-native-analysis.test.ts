@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { CodexAnalysisPort } from '../src/automation/codex-analysis.js';
 
-for(const malicious of [false,true])test(`native Codex text-only ${malicious?'rejects function calls':'completes a stateless report'}`,{skip:!process.env.RESEARCH_TEST_CODEX_BIN},async()=>{
+for(const {malicious,mislabeled} of [{malicious:false,mislabeled:false},{malicious:true,mislabeled:false},{malicious:false,mislabeled:true}])test(`native Codex text-only ${malicious?'rejects function calls':mislabeled?'accepts verified SSE with a mislabeled content type':'completes a stateless report'}`,{skip:!process.env.RESEARCH_TEST_CODEX_BIN},async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'research-native-test-'));fs.mkdirSync(path.join(root,'codex-home'));
   let calls=0;
   const text=JSON.stringify({text:'Local native probe',findings:false,limitations:['Mock inference'],references:[]});
@@ -19,7 +19,7 @@ for(const malicious of [false,true])test(`native Codex text-only ${malicious?'re
     const events=[{type:'response.created',response:{...response,status:'in_progress',output:[]}},
       {type:'response.output_item.added',output_index:0,item},...(malicious?[]:[{type:'response.output_text.delta',item_id:item.id,output_index:0,content_index:0,delta:text}]),
       {type:'response.output_item.done',output_index:0,item},{type:'response.completed',response}];
-    res.writeHead(200,{'Content-Type':'text/event-stream'});res.end(events.map(e=>'data: '+JSON.stringify(e)+'\n\n').join(''));
+    res.writeHead(200,{'Content-Type':mislabeled?'application/json':'text/event-stream'});res.end(events.map(e=>'event: '+e.type+'\ndata: '+JSON.stringify(e)+'\n\n').join(''));
   });
   await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const address=server.address() as any;
   const port=new CodexAnalysisPort(root,process.env.RESEARCH_TEST_CODEX_BIN!,`http://127.0.0.1:${address.port}/responses`,'gpt-6.1-sol',false,{...process.env,CODEX_HOME:path.join(root,'codex-home')});

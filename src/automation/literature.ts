@@ -53,7 +53,8 @@ export function publicLiteratureFetcher(fetcher:typeof fetch=researchFetch):Lite
   return async(source,query,start,end,cursor,limit,signal)=>{
     if(source==='crossref'){
       const url=new URL('https://api.crossref.org/works');url.searchParams.set('query',query);url.searchParams.set('rows',String(limit));url.searchParams.set('cursor',cursor??'*');
-      url.searchParams.set('filter',`from-index-date:${new Date(start).toISOString()},until-index-date:${new Date(end).toISOString()}`);
+      // Crossref's date filters accept second precision without milliseconds/Z.
+      url.searchParams.set('filter',`from-index-date:${new Date(start).toISOString().slice(0,19)},until-index-date:${new Date(end).toISOString().slice(0,19)}`);
       const response=await fetcher(url,{redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(15000)]),headers:{'User-Agent':'codex-weixin-research/automation (metadata watcher)'}});
       return parseCrossref(await boundedResponse(response),limit);
     }
@@ -76,6 +77,9 @@ export class LiteratureService{
       let row=(await this.store.all('SELECT * FROM literature_cursors WHERE task_id=? AND revision=? AND source=?',[run.task_id,run.revision,source]))[0];
       const start=row?.complete?Number(row.window_end)-86400_000:row?Number(row.window_start):this.now()-spec.lookbackDays*86400_000;
       const end=row&&!row.complete?Number(row.window_end):this.now();let cursor=row&&!row.complete?row.cursor as string|null:null,newItems=0,complete=false;
+      // Crossref cursors are short-lived. Reopen the same bounded window when
+      // stale; durable item/version matches prevent duplicate discoveries.
+      if(source==='crossref'&&cursor&&this.now()-Number(row?.updated_at??0)>240000)cursor=null;
       try{
         await guard();
         if(!row||row.complete)await this.store.transaction([{sql:'INSERT INTO literature_cursors VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(task_id,revision,source) DO UPDATE SET window_start=excluded.window_start,window_end=excluded.window_end,cursor=NULL,complete=0,updated_at=excluded.updated_at',params:[run.task_id,run.revision,source,start,end,null,0,this.now()]}]);

@@ -14,6 +14,7 @@ function pagination(){
   }
 }
 const labels={active:'计划已启用',paused:'计划已暂停',completed:'计划已耗尽',draft:'草稿',deleted:'已删除',
+  queued:'等待执行',running:'控制回合执行中',partial:'部分完成',needs_review:'需要核查',interrupted_unknown:'中断，结果未知',
   watching:'监控中',stopped:'监控已停止',expired:'监控已到期',skipped:'已有监控，跳过重复启动',succeeded:'执行成功',blocked:'受阻',missed:'漏跑',pending:'待投递',failed:'已拒绝/失败',unknown:'结果未知',cancelled:'已取消',api_accepted:'API 已接受 · 送达未确认'};
 function el(tag,text,cls){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(cls)node.className=cls;return node;}
 function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':'';}
@@ -44,6 +45,7 @@ function format(at,zone='Asia/Shanghai'){
 function syncFields(){
   const kind=$('schedule').value;
   const gpu=$('task-kind').value==='gpu_watch';$('gpu-fields').hidden=!gpu;
+  window.ResearchUI.sync($('task-kind').value);
   $('once-field').hidden=kind!=='once';$('at').required=kind==='once';
   $('time-field').hidden=!['daily','weekly'].includes(kind);$('week-field').hidden=kind!=='weekly';$('interval-field').hidden=kind!=='interval';
   $('save').disabled=!state.enabled||!$('sender').value||(gpu&&!$('gpu-server').value);
@@ -54,6 +56,7 @@ function reset(){
   state.edit=null;state.intervalAnchor=null;$('task-form').reset();$('form-title').textContent='新建任务';$('save').textContent='保存任务';$('preview-times').textContent='';syncFields();
 }
 function chooseSenders(){
+  window.ResearchUI.resetLoad();
   resetPages();
   const prior=$('sender').value;
   const account=state.accounts.find(a=>a.accountId===$('account').value);
@@ -63,6 +66,7 @@ function chooseSenders(){
   reset();
 }
 async function bootstrap(){
+  window.ResearchUI.resetLoad();
   state.targetsLoaded=false;
   const response=await fetch('/api/bootstrap',{credentials:'same-origin'});
   if(response.status===401){location.assign('/');return;}
@@ -75,8 +79,8 @@ async function bootstrap(){
 }
 function button(label,fn){const b=el('button',label);b.type='button';b.addEventListener('click',()=>action(fn));return b;}
 function edit(task){
-  if(!['reminder','gpu_watch'].includes(task.definition.kind)){message('此任务类型尚未开放编辑。',true);return;}
   state.edit=task;$('form-title').textContent='编辑任务';$('save').textContent='保存修改';$('task-kind').value=task.definition.kind;
+  window.ResearchUI.edit(task.definition);
   const g=task.definition.gpuWatch;
   if(g){$('gpu-server').value=g.server;$('gpu-duration').value=g.durationSeconds/60;$('gpu-period').value=g.sampleSeconds;$('gpu-free').value=g.minFreeBytes/1024**3;$('gpu-used').value=g.maxUsedBytes/1024**2;$('gpu-stable').value=g.stableSamples;}
   $('title').value=task.definition.title;$('prompt').value=task.definition.prompt;
@@ -131,6 +135,7 @@ function renderRecords(runs,notifications){
   for(const run of runs){
     const record=el('article',undefined,'record');record.append(el('span',labels[run.state]||run.state,'badge'),el('p',`${format(run.ended_at)} · ${run.id}`,'muted'));
     try{record.append(el('p',JSON.parse(run.result||'{}').text||''));}catch{}$('runs').append(record);
+    if(['queued','running'].includes(run.state))record.append(button('停止本轮',async()=>{await request(`/runs/${run.id}/cancel`,'POST',{});message('已停止本轮控制；远程作业与保留须在科研流程中单独管理。');await refresh();}));
   }
   for(const notification of notifications){
     const record=el('article',undefined,'record');record.append(el('span',labels[notification.state]||notification.state,'badge'),el('p',notification.content),el('p',notification.id,'muted'));
@@ -148,7 +153,7 @@ async function refresh(){
   if(generation!==state.generation)return;
   state.enabled=runtime.enabled;
   $('status').textContent=!runtime.enabled?'定时预览未启用。展开下方“当前支持范围与服务设置”查看启用方法。':runtime.error?`调度异常：${runtime.error}`:
-    `调度服务${runtime.running?'运行中':'尚未启动'} · 微信投递${runtime.delivery.ready?'已连接':'未配置'} · GPU 观测${runtime.gpuObservation?.configured?'已配置':'未配置'} · 模型执行尚未启用`;
+    `调度${runtime.running?'运行中':'尚未启动'} · 微信投递${runtime.delivery.ready?'已连接':'未配置'} · Agent ${runtime.research?.analysis?.configured?'已配置':'未配置'} · 科研 MCP ${runtime.research?.remote?.configured?'已配置':'未配置'} · 文献 ${runtime.research?.literature?.configured?'已启用':'未启用'}`;
   $('status').classList.toggle('error',Boolean(runtime.error));syncFields();
   if(!runtime.enabled||!$('account').value||!$('sender').value){
     $('tasks').replaceChildren(el('p','请选择已启用账号的授权接收人。','empty'));$('runs').replaceChildren();$('notifications').replaceChildren();renderWatches([]);return;
@@ -162,12 +167,13 @@ async function refresh(){
     }catch{message('GPU MCP 不可用；提醒功能仍可使用。',true);}
     syncFields();
   }
+  await window.ResearchUI.load(runtime);
   const [tasks,runs,notifications,watches]=await Promise.all([
     ...['tasks','runs','notifications'].map(name=>request(`/${name}`,'GET',undefined,ownerScope+'&limit=50'+(pages[name].cursor?'&cursor='+encodeURIComponent(pages[name].cursor):''))),
     request('/gpu/watches','GET',undefined,ownerScope)]);
   if(generation!==state.generation||ownerScope!==scope())return;
   for(const [name,value] of [['tasks',tasks],['runs',runs],['notifications',notifications]])pages[name].next=value.nextCursor;
-  renderTasks(tasks.tasks);renderRecords(runs.items,notifications.items);renderWatches(watches.items);pagination();
+  renderTasks(tasks.tasks);renderRecords(runs.items,notifications.items);renderWatches(watches.items);pagination();await window.ResearchUI.render();
 }
 async function definition(forSave=false){
   const timezone=$('timezone').value.trim(),kind=$('schedule').value;
@@ -187,6 +193,7 @@ async function definition(forSave=false){
     }
     schedule={kind,timezone,everySeconds,anchorUtc};
   }
+  if(!forSave)return {schedule};
   const result={kind:$('task-kind').value,title:$('title').value,prompt:$('prompt').value,projectId:state.edit?.definition.projectId||null,schedule,notification:$('notification').value};
   if(result.kind==='gpu_watch'){
     const target=state.targets.find(t=>t.server===$('gpu-server').value);if(!target)throw new Error('请先配置可用的观测服务器');
@@ -195,9 +202,10 @@ async function definition(forSave=false){
       durationSeconds:Number($('gpu-duration').value)*60,sampleSeconds:Number($('gpu-period').value),minFreeBytes:Math.round(Number($('gpu-free').value)*1024**3),
       maxUsedBytes:Math.round(Number($('gpu-used').value)*1024**2),stableSamples:Number($('gpu-stable').value),gpuUuids:saved?.gpuUuids||[],maxUtilization:saved?.maxUtilization??0};
   }
-  return result;
+  return window.ResearchUI.definition(result,state.edit?.definition);
 }
 document.addEventListener('DOMContentLoaded',()=>{
+  window.ResearchUI.init({request,message,el,button,refresh,scope,sync:syncFields});
   $('schedule').addEventListener('change',syncFields);
   $('task-kind').addEventListener('change',syncFields);
   $('gpu-server').addEventListener('change',syncFields);
@@ -206,7 +214,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   $('sender').addEventListener('change',()=>{resetPages();reset();void refresh().catch(e=>message(e.message,true));});
   $('refresh').addEventListener('click',()=>action(async()=>{await bootstrap();await refresh();}));
   $('preview').addEventListener('click',()=>action(async()=>{
-    const def=await definition();const reply=await request('/preview','POST',def.schedule);
+    const def=await definition(false);const reply=await request('/preview','POST',def.schedule);
     $('preview-times').textContent=reply.times.length?`接下来：${reply.times.map(t=>format(t,def.schedule.timezone)).join('；')}`:'没有未来触发时间。';
   }));
   $('task-form').addEventListener('submit',event=>{

@@ -22,10 +22,10 @@ function workflow(mode:'immediate'|'launch_when_ready'|'reserve_then_handoff'='i
   workflow:{target,recipe:{root:'/project',executable:'/python',args:['train.py'],codeVersion:'latest_record'},mode,grant:{submit:true,reserve:mode==='reserve_then_handoff',stop:false},
     resource:{gpuCount:1,minFreeBytes:1024,maxUsedBytes:64*1024**2,holderBytes:1024,holdSeconds:30,stableSamples:2,waitDeadlineUtc:new Date(200000).toISOString(),handoff:'automatic'},monitorSeconds:5}};}
 class FakeRemote implements ResearchRemotePort{
-  now=0;submits=0;reserves=0;handoffs=0;loseSubmit=false;objects=new Map<string,any>();operations=new Map<string,string>();
+  now=0;submits=0;reserves=0;handoffs=0;preflights=0;busy=false;loseSubmit=false;objects=new Map<string,any>();operations=new Map<string,string>();
   async invoke(r:RemoteRequest):Promise<RemoteReceipt>{
     const receipt=(state:RemoteReceipt['state'],objectId?:string,payload:Record<string,unknown>={}):RemoteReceipt=>({version:1,operationId:r.operationId,payloadHash:r.payloadHash,ownerScope:r.ownerScope,serverId:'machine',bootId:'boot',uid:1000,remoteNow:this.now,state,...(objectId?{objectId}:{}),payload});
-    if(r.action==='preflight')return receipt('ready',undefined,{tmux:true,reservation:true,gpu:[{uuid:'GPU-abc',index:0,totalBytes:24*1024**3,usedBytes:0,utilization:0,pids:[]}]});
+    if(r.action==='preflight'){this.preflights++;return receipt('ready',undefined,{tmux:true,reservation:true,gpu:[{uuid:'GPU-abc',index:0,totalBytes:24*1024**3,usedBytes:this.busy?128*1024**2:0,utilization:0,pids:this.busy?[123]:[]}]});}
     if(r.action==='submit'||r.action==='reserve'){
       const id=String(r.payload.objectId);this.operations.set(r.operationId,id);this.objects.set(id,{kind:r.action==='reserve'?'lease':'job',state:r.action==='reserve'?'held':'running',scope:r.ownerScope,deadline:r.payload.leaseDeadlineMs,
         payload:r.action==='reserve'?{allocation:{bytesPerGpu:(r.payload.resource as any).holderBytes,gpuUuids:r.payload.selectedGpuUuids}}:{}});
@@ -211,5 +211,45 @@ test('cancelled analysis cannot publish a late report; WeChat exposes research c
     assert.equal((await f.runtime.store.all("SELECT count(*) n FROM research_artifacts WHERE name='report.json'"))[0].n,0);
     assert.equal(await handleWeixinAutomation(f.runtime,owner,{id:'jobs',text:'/jobs'},0),'暂无科研流程。');
     assert.match((await handleWeixinAutomation(f.runtime,{accountId:'a',senderId:'intruder'},{id:'private',text:'/results'},0))!,/Access denied/);
+  }finally{await f.close();}
+});
+
+test('a restart reconciles the persisted submission identity without submitting another experiment',async()=>{
+  const f=fixture();let resumed:AutomationRuntime|undefined;
+  try{
+    f.remote.loseSubmit=true;const {run}=await f.register(workflow());await f.step(0);await f.runtime.close();
+    f.remote.now=60000;resumed=new AutomationRuntime(f.root,{now:()=>60000,authorize:()=>true,research:{remote:f.remote}});
+    await resumed.research.start();await resumed.research.workflows!.scan();
+    assert.equal((await resumed.store.all('SELECT state FROM research_workflows WHERE id=?',[run.id]))[0].state,'monitoring');
+    assert.equal(f.remote.submits,1);assert.equal((await resumed.store.all('SELECT count(*) n FROM operations'))[0].n,1);
+  }finally{await resumed?.close();await f.close();}
+});
+
+test('research history pages retain old artifacts and reject another owner or collection cursor',async()=>{
+  const f=fixture();try{
+    const {task,run}=await f.register(workflow());
+    for(let i=0;i<5;i++)await f.runtime.research.artifacts.write(task.id,run.id,'proof.json',{i},0);
+    const one=await f.runtime.tasks.page(owner,'artifacts',{limit:2});assert.equal(one.items.length,2);assert.ok(one.nextCursor);
+    const two=await f.runtime.tasks.page(owner,'artifacts',{limit:2,cursor:one.nextCursor!});
+    const three=await f.runtime.tasks.page(owner,'artifacts',{limit:2,cursor:two.nextCursor!});
+    assert.equal(new Set([...one.items,...two.items,...three.items].map(r=>r.id)).size,5);
+    await assert.rejects(f.runtime.tasks.page(owner,'objects',{cursor:one.nextCursor!}),/pagination/);
+    await assert.rejects(f.runtime.tasks.page({accountId:'a',senderId:'other'},'artifacts',{cursor:one.nextCursor!}),/Access denied/);
+  }finally{await f.close();}
+});
+
+test('waiting workflows share one GPU observation and log anomaly notifications are explicit and deduplicated',async()=>{
+  const f=fixture();try{
+    f.remote.busy=true;await f.register(workflow('launch_when_ready'),'one');await f.register(workflow('launch_when_ready'),'two');
+    const before=f.remote.preflights;await f.step(0);assert.equal(f.remote.preflights-before,1);assert.equal(f.remote.submits,0);
+    f.remote.busy=false;const input=workflow();input.workflow!.logStallSeconds=5;input.workflow!.logAlerts=['oom'];
+    const {run}=await f.register(input,'logs');await f.step(1000);
+    const row=(await f.runtime.store.all('SELECT data FROM research_workflows WHERE id=?',[run.id]))[0],id=JSON.parse(String(row.data)).jobId;
+    f.remote.objects.get(id).payload={logBytes:0,logTail:''};await f.step(6000);await f.step(11000);
+    let data=JSON.parse(String((await f.runtime.store.all('SELECT data FROM research_workflows WHERE id=?',[run.id]))[0].data));assert.equal(data.logStalled,true);
+    f.remote.objects.get(id).payload={logBytes:42,logTail:'CUDA out of memory'};await f.step(16000);await f.step(21000);
+    const notices=await f.runtime.store.all("SELECT content FROM notifications WHERE content LIKE '%匹配 OOM%' AND content LIKE ?",['%'+run.id+'%']);assert.equal(notices.length,1);
+    data=JSON.parse(String((await f.runtime.store.all('SELECT data FROM research_workflows WHERE id=?',[run.id]))[0].data));assert.equal(data.logAlertsSeen.oom,true);
+    assert.equal(f.remote.objects.get(id).state,'running');
   }finally{await f.close();}
 });

@@ -16,13 +16,14 @@ export const workflowSchema=z.object({target:remoteTargetSchema,recipe:recipeSch
     holderBytes:z.number().int().nonnegative().default(0),holdSeconds:z.number().int().min(15).max(86400).default(1800),
     stableSamples:z.number().int().min(1).max(20).default(2),waitDeadlineUtc:z.string().datetime(),handoff:z.enum(['manual','automatic']).default('manual')}).strict(),
   validation:validationSchema.default({metricsFile:'metrics.json',requiredFiles:[]}),monitorSeconds:z.number().int().min(5).max(86400).default(900),
-  maxRuntimeSeconds:z.number().int().min(1).max(30*86400).optional(),retryCount:z.number().int().min(0).max(4).default(0)
+  maxRuntimeSeconds:z.number().int().min(1).max(30*86400).optional(),retryCount:z.number().int().min(0).max(4).default(0),
+  logStallSeconds:z.number().int().min(5).max(30*86400).optional(),logAlerts:z.array(z.enum(['oom','nan'])).max(2).default([])
 }).strict().superRefine((v,c)=>{
   if(v.retryCount+1>v.grant.maxSubmissions)c.addIssue({code:'custom',message:'Retry count exceeds submission grant'});
   if(v.mode!=='immediate'&&v.resource.gpuCount===0)c.addIssue({code:'custom',message:'Resource waiting requires a GPU count'});
   if(v.mode==='reserve_then_handoff'&&(!v.grant.reserve||v.resource.holderBytes<=0))c.addIssue({code:'custom',message:'Reservation requires an explicit grant and positive holder bytes'});
 });
-export const jobMonitorSchema=z.object({target:remoteTargetSchema,jobId:id,monitorSeconds:z.number().int().min(5).max(86400).default(900),durationSeconds:z.number().int().min(15).max(30*86400).default(7*86400)}).strict();
+export const jobMonitorSchema=z.object({target:remoteTargetSchema,jobId:id,monitorSeconds:z.number().int().min(5).max(86400).default(900),durationSeconds:z.number().int().min(15).max(30*86400).default(7*86400),logStallSeconds:z.number().int().min(5).max(30*86400).optional(),logAlerts:z.array(z.enum(['oom','nan'])).max(2).default([])}).strict();
 export const agentSchema=z.object({profile:z.enum(['render_report','analyze_evidence','parse_task','screen_literature']).default('render_report'),
   projectBindingHash:digest.optional(),
   remoteTarget:remoteTargetSchema.optional(),

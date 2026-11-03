@@ -32,22 +32,35 @@ export function assertTextOnlyResponse(text:string,eventStream:boolean):void{
 
 export async function startInferenceFirewall(upstream:string,signal:AbortSignal,fetcher:typeof fetch=researchFetch){
   const url=new URL(upstream);if(url.protocol!=='https:'&&!['127.0.0.1','localhost','[::1]'].includes(url.hostname))throw new Error('Inference upstream must use HTTPS');
-  const token=crypto.randomBytes(24).toString('hex');let requests=0;
+  const token=crypto.randomBytes(24).toString('hex');let requests=0,firstError:string|undefined;
   const server=http.createServer(async(request,response)=>{
     try{
-      if(request.method!=='POST'||request.url!==`/${token}/responses`)throw new Error('Unsupported inference route');
+      if(request.method!=='POST'){
+        // Some native clients probe the Responses websocket path first. Reject
+        // that protocol explicitly so they can use the verified HTTP transport.
+        response.writeHead(426,{'Allow':'POST'});response.end();return;
+      }
+      const requestUrl=new URL(request.url??'','http://127.0.0.1');
+      if(requestUrl.pathname!==`/${token}/responses`)throw new Error('Unsupported inference POST route '+requestUrl.pathname.replace(token,'route'));
       const chunks:Buffer[]=[];let bytes=0;
       for await(const chunk of request){bytes+=chunk.length;if(bytes>512*1024)throw new Error('Inference input exceeds budget');chunks.push(Buffer.from(chunk));}
       if(requests++>=3)throw new Error('Analysis inference request budget exhausted');
       if(request.headers['content-encoding'])throw new Error('Compressed inference input is unsupported');
       const body=textOnlyRequest(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       const headers:Record<string,string>={'Content-Type':'application/json'};
-      for(const name of ['authorization','chatgpt-account-id','openai-beta','user-agent'])if(typeof request.headers[name]==='string')headers[name]=request.headers[name];
+      for(const name of ['authorization','chatgpt-account-id','openai-beta','user-agent','originator','version','session_id','x-codex-turn-metadata'])if(typeof request.headers[name]==='string')headers[name]=request.headers[name];
       const result=await fetcher(url,{method:'POST',headers,body:JSON.stringify(body),redirect:'error',signal});
-      const text=await boundedResponse(result,2*1024*1024),eventStream=result.headers.get('content-type')?.includes('text/event-stream')??false;
+      if(!result.ok){
+        const raw=await boundedResponse(new Response(result.body),32768);let detail='';
+        try{const value=JSON.parse(raw),message=value.error?.message??value.detail??value.message;
+          if(typeof message==='string'&&/^[A-Za-z0-9 _.,:()'"=\[\]-]{1,180}$/.test(message)&&!/key|token|secret|auth/i.test(message))detail=': '+message;
+        }catch{}
+        throw new Error('Inference upstream HTTP '+result.status+detail);
+      }
+      const text=await boundedResponse(result,2*1024*1024),eventStream=(result.headers.get('content-type')?.includes('text/event-stream')??false)||/^\s*(?:event|data):/.test(text);
       assertTextOnlyResponse(text,eventStream);
       response.writeHead(200,{'Content-Type':eventStream?'text/event-stream':'application/json'});response.end(text);
-    }catch{response.writeHead(502,{'Content-Type':'application/json'});response.end(JSON.stringify({error:{message:'Scheduled text-only inference rejected or unavailable'}}));}
+    }catch(error){firstError??=error instanceof Error?error.message.slice(0,200):'protocol_error';response.writeHead(502,{'Content-Type':'application/json'});response.end(JSON.stringify({error:{message:'Scheduled text-only inference rejected or unavailable: '+firstError}}));}
   });
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',()=>resolve());});
   const address=server.address();if(!address||typeof address==='string')throw new Error('Inference firewall failed to bind');

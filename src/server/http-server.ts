@@ -508,6 +508,7 @@ function serveStatic(response: ServerResponse, pathname: string): void {
     "/index.html": { name: "index.html", type: "text/html; charset=utf-8" },
     "/automation.html": { name: "automation.html", type: "text/html; charset=utf-8" },
     "/automation.js": { name: "automation.js", type: "text/javascript; charset=utf-8" },
+    "/research-ui.js": { name: "research-ui.js", type: "text/javascript; charset=utf-8" },
     "/automation.css": { name: "automation.css", type: "text/css; charset=utf-8" },
     "/favicon.ico": { name: "favicon.svg", type: "image/svg+xml" },
     "/favicon.svg": { name: "favicon.svg", type: "image/svg+xml" },
