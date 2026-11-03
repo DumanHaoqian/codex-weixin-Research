@@ -21,7 +21,7 @@ lines.on('line',line=>{
     reply(m.id,{thread:{id:'observation'},approvalPolicy:'never',sandbox:{type:mode.includes('unverified')?'dangerFullAccess':'readOnly'}});return;
   }
   if(m.method==='mcpServer/tool/call'){
-    if(m.params.server!=='polyu4090'||m.params.threadId!=='observation'||!['servers_list','ssh_exec'].includes(m.params.tool))
+    if(m.params.server!=='compute-server-management'||m.params.threadId!=='observation'||!['servers_list','ssh_exec'].includes(m.params.tool))
       return send({id:m.id,error:{code:-1,message:'invalid collector call'}});
     if(mode.includes('denied')){
       pending=m.id;send({id:9000,method:'item/permissions/requestApproval',params:{threadId:'observation',permissions:{network:{enabled:true}}}});return;

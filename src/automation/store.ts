@@ -18,12 +18,12 @@ try {
   db = new DatabaseSync(workerData.file);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
   const version = db.prepare('PRAGMA user_version').get().user_version;
-  if (version > 3) throw new Error('Unsupported automation schema version: ' + version);
+  if (version > 4) throw new Error('Unsupported automation schema version: ' + version);
   db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
-  if (version > 0 && version < 3 && workerData.file !== ':memory:') {
+  if (version > 0 && version < 4 && workerData.file !== ':memory:') {
     const backupDir = path.join(path.dirname(workerData.file), 'backups');
     fs.mkdirSync(backupDir, {recursive:true});
-    const backup = path.join(backupDir, 'pre-v3-from-v' + version + '-' + require('node:crypto').randomUUID() + '.sqlite');
+    const backup = path.join(backupDir, 'pre-v4-from-v' + version + '-' + require('node:crypto').randomUUID() + '.sqlite');
     // VACUUM INTO takes a consistent SQLite snapshot, including committed WAL.
     // Never copy an open .sqlite file while silently omitting its WAL sidecar.
     db.prepare('VACUUM INTO ?').run(backup);
@@ -33,7 +33,7 @@ try {
     db.exec(workerData.schema);
     if (!db.prepare('PRAGMA table_info(notification_attempts)').all().some(c => c.name === 'part_id'))
       db.exec('ALTER TABLE notification_attempts ADD COLUMN part_id TEXT REFERENCES notification_parts(id)');
-    db.exec('PRAGMA user_version=3; COMMIT');
+    db.exec('PRAGMA user_version=4; COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   parentPort.postMessage({ready:true});
 } catch (e) { try { db?.close(); } catch {} parentPort.postMessage({fatal:String(e.message)}); parentPort.close(); }
@@ -126,6 +126,38 @@ CREATE TABLE IF NOT EXISTS gpu_observations (
  previous_valid_id TEXT REFERENCES gpu_observations(id)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS gpu_observations_task ON gpu_observations(task_id,observed_at);
+CREATE TABLE IF NOT EXISTS research_workflows (
+ id TEXT PRIMARY KEY REFERENCES runs(id),task_id TEXT NOT NULL REFERENCES tasks(id),phase TEXT NOT NULL,
+ state TEXT NOT NULL,next_check INTEGER NOT NULL,deadline INTEGER NOT NULL,submissions INTEGER NOT NULL,
+ data TEXT NOT NULL,updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS research_workflows_due ON research_workflows(state,next_check);
+CREATE UNIQUE INDEX IF NOT EXISTS active_task_workflow ON research_workflows(task_id) WHERE state IN ('waiting','submitting','reserving','held','handoff','monitoring','unknown');
+CREATE TABLE IF NOT EXISTS research_objects (
+ id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),workflow_id TEXT NOT NULL REFERENCES research_workflows(id),
+ operation_id TEXT NOT NULL,server_id TEXT NOT NULL,remote_id TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,
+ receipt TEXT NOT NULL,metrics TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS research_artifacts (
+ id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),run_id TEXT NOT NULL REFERENCES runs(id),
+ name TEXT NOT NULL,media_type TEXT NOT NULL,sha256 TEXT NOT NULL,size INTEGER NOT NULL,relative_path TEXT NOT NULL,created_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS literature_cursors (
+ task_id TEXT NOT NULL REFERENCES tasks(id),revision INTEGER NOT NULL,source TEXT NOT NULL,window_start INTEGER NOT NULL,
+ window_end INTEGER NOT NULL,cursor TEXT,complete INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(task_id,revision,source)
+) STRICT;
+CREATE TABLE IF NOT EXISTS literature_items (
+ id TEXT PRIMARY KEY,identity TEXT NOT NULL UNIQUE,version TEXT NOT NULL,metadata TEXT NOT NULL,updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS literature_matches (
+ task_id TEXT NOT NULL REFERENCES tasks(id),item_id TEXT NOT NULL REFERENCES literature_items(id),version TEXT NOT NULL,
+ run_id TEXT NOT NULL REFERENCES runs(id),event_id TEXT REFERENCES events(id),discovered_at INTEGER NOT NULL,
+ PRIMARY KEY(task_id,item_id,version)
+) STRICT;
+CREATE TABLE IF NOT EXISTS literature_versions (
+ item_id TEXT NOT NULL REFERENCES literature_items(id),version TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(item_id,version)
+) STRICT;
 `;
 
 export class AutomationStore {

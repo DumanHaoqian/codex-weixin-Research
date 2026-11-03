@@ -15,7 +15,7 @@ test('v2 migration takes a consistent pre-migration snapshot and preserves exist
       {sql:'DROP TABLE gpu_observations'}, {sql:'DROP TABLE gpu_watches'}, {sql:'PRAGMA user_version=2'}
     ]);
     await store.close();store=new AutomationStore(file);
-    assert.equal((await store.all('PRAGMA user_version'))[0].user_version,3);
+    assert.equal((await store.all('PRAGMA user_version'))[0].user_version,4);
     assert.equal((await store.all('SELECT id FROM tasks'))[0].id,'existing');
     assert.equal((await store.all('SELECT count(*) n FROM gpu_watches'))[0].n,0);
     const backups=fs.readdirSync(path.join(root,'backups'));assert.equal(backups.length,1);

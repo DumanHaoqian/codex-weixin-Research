@@ -8,9 +8,11 @@ const help=['定时任务：',
   '/tasks at 2026-12-01T09:00:00+08:00 提醒内容',
   '/tasks show|pause|resume|delete|run <任务ID>',
   '/tasks edit <任务ID> <完整任务JSON>',
+  '/tasks create <完整任务JSON>', '/tasks agent 30m 提示', '/tasks agent-daily 09:00 提示', '/tasks papers 09:00 检索式',
+  '/jobs', '/jobs show <流程ID>', '/jobs handoff|release|stop|stop-monitor|resume-monitor <流程ID>', '/results', '/results artifact <产物ID>', '/papers',
   '/tasks gpu <服务器> <监控时长，如1h> <说明>', '/gpu', '/gpu history', '/gpu stop <任务ID>',
   '/tasks notifications', '/tasks resend <通知ID> [unknown|accepted]',
-  'GPU 监控需先配置只读 MCP；仅观测，不启动训练或占卡。模型执行尚未启用。时间默认 Asia/Shanghai。'].join('\n');
+  '训练与占卡须保存固定方案、明确授权和资源期限。时间默认 Asia/Shanghai。'].join('\n');
 
 function describe(task:Task):string{
   const next=task.nextDue===null?'无':new Intl.DateTimeFormat('zh-CN',{timeZone:task.definition.schedule.timezone,dateStyle:'short',timeStyle:'short'}).format(task.nextDue);
@@ -26,12 +28,32 @@ export async function handleWeixinAutomation(runtime:AutomationRuntime|undefined
   const text=message.text.trim();
   const natural=/^(?:请)?(\d+)(分钟|小时|天)后提醒我[，,:：\s]*(.+)$/s.exec(text);
   const daily=/^(?:请)?每天\s*((?:[01]?\d|2[0-3]):[0-5]\d)\s*提醒我[，,:：\s]*(.+)$/s.exec(text);
-  const isCommand=/^\/(?:tasks|gpu)(?:\s|$)/.test(text);
+  const isCommand=/^\/(?:tasks|gpu|jobs|results|papers)(?:\s|$)/.test(text);
   if(!isCommand&&!natural&&!daily){runtime?.wake(owner);return undefined;}
   if(!runtime)return '定时任务预览尚未启用。请在本机服务设置 CODEX_WEIXIN_AUTOMATION=1 后重启。';
   runtime.wake(owner);
   if(message.attachments?.length)return '任务创建暂不接收附件，请用明确的文字内容。';
   try{
+    const research=/^\/(jobs|results|papers)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(text);
+    if(research){
+      await runtime.tasks.authorized(owner);const [,area,action,id]=research;
+      if(area==='jobs'){
+        if(action&&action!=='show'){
+          const actions:Record<string,string>={'handoff':'handoff','release':'release','stop':'stop','stop-monitor':'stop_monitor','resume-monitor':'resume_monitor'};
+          if(!runtime.research.workflows||!actions[action])throw new Error('科研控制不可用或命令无效');
+          return JSON.stringify(await runtime.research.workflows.control(owner,id?.trim()??'',actions[action] as any,message.id));
+        }
+        const rows=await runtime.store.all(`SELECT w.* FROM research_workflows w JOIN tasks t ON t.id=w.task_id WHERE t.account_id=? AND t.sender_id=? ${action==='show'?'AND w.id=?':''} ORDER BY w.updated_at DESC LIMIT 10`,[owner.accountId,owner.senderId,...(action==='show'?[id?.trim()??'']:[])]);
+        return rows.map(row=>{const d=JSON.parse(String(row.data));return `${row.id} · ${row.state}\n阶段：${row.phase} · 服务器：${d.target.server}\n作业：${d.jobId??'无'} · 保留：${d.leaseId??'无'}\n${d.lastNotice??''}`;}).join('\n\n')||'暂无科研流程。';
+      }
+      if(area==='results'){
+        if(action==='artifact')return (await runtime.research.artifacts.read(id?.trim()??'',owner.accountId,owner.senderId)).text.slice(0,24000);
+        const rows=await runtime.store.all('SELECT a.id,a.name,a.sha256 FROM research_artifacts a JOIN tasks t ON t.id=a.task_id WHERE t.account_id=? AND t.sender_id=? ORDER BY a.created_at DESC LIMIT 20',[owner.accountId,owner.senderId]);
+        return rows.map(r=>`${r.name}\n${r.id}\nSHA256: ${r.sha256}`).join('\n\n')||'暂无科研产物。';
+      }
+      const papers=await runtime.store.all('SELECT v.metadata,m.version FROM literature_matches m JOIN tasks t ON t.id=m.task_id JOIN literature_versions v ON v.item_id=m.item_id AND v.version=m.version WHERE t.account_id=? AND t.sender_id=? ORDER BY m.discovered_at DESC LIMIT 10',[owner.accountId,owner.senderId]);
+      return papers.map(p=>{const d=JSON.parse(String(p.metadata));return `${d.title}\n${d.url}\n${d.dateType}: ${d.date} · 阅读层级：${d.readingLevel}`;}).join('\n\n')||'暂无文献记录。';
+    }
     const gpu=/^\/gpu(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(text);
     if(gpu){
       await runtime.tasks.authorized(owner);
@@ -46,9 +68,12 @@ export async function handleWeixinAutomation(runtime:AutomationRuntime|undefined
     }
     const match=/^\/tasks(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(text);
     let action=match?.[1]??'list',args=match?.[2]??'';
+    const special=action==='agent'||action==='agent-daily'?'agent_report':action==='papers'?'literature_watch':null;
+    if(action==='agent')action='add';else if(action==='agent-daily'||action==='papers')action='daily';
     if(natural){action='add';args=`${natural[1]}${natural[2]==='分钟'?'m':natural[2]==='小时'?'h':'d'} ${natural[3]}`;}
     if(daily){action='daily';args=`${daily[1].padStart(5,'0')} ${daily[2]}`;}
     if(action==='help')return help;
+    if(action==='create')return describe(await runtime.tasks.create(owner,`wx:${message.id}`,JSON.parse(args),false,text));
     if(action==='list'){
       const tasks=await runtime.tasks.list(owner);return tasks.filter(t=>t.state!=='deleted').map(describe).join('\n\n')||`还没有任务。\n${help}`;
     }
@@ -94,8 +119,11 @@ export async function handleWeixinAutomation(runtime:AutomationRuntime|undefined
       const split=/^(\S+)\s+(\S+)\s+([\s\S]+)$/.exec(args);if(!split)throw new Error(help);
       definition={...prefix,prompt:split[3],schedule:{kind:'weekly',weekdays:split[1].split(',').map(Number),time:split[2],timezone}};
     }else return help;
+    if(special==='agent_report')definition={...definition,kind:special,title:'定时 Agent',agent:{}};
+    if(special==='literature_watch')definition={...definition,kind:special,title:'文献追踪',literature:{query:definition.prompt,sources:['crossref','arxiv']},notification:'findings_or_failure'};
     const task=await runtime.tasks.create(owner,`wx:${message.id}`,definition,false,text);
-    return `已保存${task.definition.kind==='gpu_watch'?' GPU 监控':'提醒'}：\n${describe(task)}`;
+    const labels:Record<string,string>={gpu_watch:' GPU 监控',agent_report:'定时 Agent',literature_watch:'文献追踪'};
+    return `已保存${labels[task.definition.kind]??'提醒'}：\n${describe(task)}`;
   }catch(error){
     if(error instanceof z.ZodError)return `任务参数无效：${error.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; ')}`;
     return `任务操作未完成：${error instanceof Error?error.message:String(error)}`;

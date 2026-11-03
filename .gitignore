@@ -24,3 +24,5 @@ tmp/
 /.ssh/
 *.pem
 *.key
+__pycache__/
+*.pyc

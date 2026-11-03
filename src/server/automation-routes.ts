@@ -3,6 +3,7 @@ import { automationCapabilities } from '../automation/capabilities.js';
 import type { AutomationRuntime } from '../automation/runtime.js';
 import { ownerSchema, taskSchema } from '../automation/tasks.js';
 import { nextAfter, resolveWallTime, scheduleSchema } from '../automation/calendar.js';
+import { hash } from '../automation/research-contracts.js';
 
 export type AutomationReply={status:number;body:unknown};
 
@@ -18,6 +19,36 @@ export async function automationRoute(method:string,url:URL,body:unknown,key:str
     const page = () => z.object({limit:z.coerce.number().int().min(1).max(100).optional(),cursor:z.string().max(1500).optional()}).parse({
       limit:url.searchParams.get('limit')??undefined,cursor:url.searchParams.get('cursor')??undefined
     });
+    if(route.startsWith('/research/')||route.startsWith('/artifacts/')||/^\/runs\/.+\/cancel$/.test(route)){
+      await runtime.tasks.authorized(owner);
+      if(method==='GET'&&route==='/research/projects')return {status:200,body:{projects:runtime.research.projects()}};
+      if(method==='GET'&&route==='/research/targets')return {status:200,body:{targets:await runtime.research.options.remote?.targets?.()??[]}};
+      const collection=/^\/research\/(workflows|objects|artifacts|literature)$/.exec(route);
+      if(method==='GET'&&collection)return {status:200,body:await runtime.tasks.page(owner,collection[1] as 'workflows'|'objects'|'artifacts'|'literature',page())};
+      const artifact=/^\/artifacts\/([a-f0-9-]{36})$/.exec(route);
+      if(method==='GET'&&artifact)return {status:200,body:await runtime.research.artifacts.read(artifact[1],owner.accountId,owner.senderId)};
+      const control=/^\/research\/workflows\/([a-f0-9-]{36})\/(handoff|release|stop|stop_monitor|resume_monitor)$/.exec(route);
+      if(method==='POST'&&control){
+        if(!key)return {status:400,body:{error:'Idempotency-Key required'}};
+        if(!runtime.research.workflows)return {status:503,body:{error:'Research MCP unavailable'}};
+        return {status:202,body:await runtime.research.workflows.control(owner,control[1],control[2] as any,key)};
+      }
+      const cancel=/^\/runs\/([a-f0-9-]{36})\/cancel$/.exec(route);
+      if(method==='POST'&&cancel){
+        if(!key)return {status:400,body:{error:'Idempotency-Key required'}};
+        z.string().max(200).parse(key);
+        const requestKey=`cancel:${key}`,payloadHash=hash({id:cancel[1]});
+        const previous=(await runtime.store.all('SELECT * FROM requests WHERE account_id=? AND sender_id=? AND request_key=?',[owner.accountId,owner.senderId,requestKey]))[0];
+        if(previous){if(previous.payload_hash!==payloadHash)throw new Error('Idempotency conflict');return {status:200,body:JSON.parse(String(previous.response))};}
+        const run=(await runtime.store.all('SELECT r.* FROM runs r JOIN tasks t ON t.id=r.task_id WHERE r.id=? AND t.account_id=? AND t.sender_id=?',[cancel[1],owner.accountId,owner.senderId]))[0];
+        if(!run)throw new Error('Run not found');
+        const result={cancelled:['queued','running'].includes(String(run.state)),runId:run.id};
+        await runtime.store.transaction([{sql:"UPDATE occurrences SET state='cancelled' WHERE id=? AND EXISTS (SELECT 1 FROM runs WHERE id=? AND state IN ('queued','running'))",params:[run.occurrence_id,run.id]},
+          {sql:"UPDATE runs SET state='cancelled',ended_at=? WHERE id=? AND state IN ('queued','running')",params:[Date.now(),run.id]},
+          {sql:'INSERT INTO requests VALUES (?,?,?,?,?)',params:[owner.accountId,owner.senderId,requestKey,payloadHash,JSON.stringify(result)]}]);
+        runtime.research.worker.cancel(String(run.id));return {status:200,body:result};
+      }
+    }
     if(method==='GET'&&route.startsWith('/gpu/')){
       await runtime.tasks.authorized(owner);
       if(route==='/gpu/targets')return runtime.gpu?{status:200,body:{targets:await runtime.gpu.port.targets()}}:{status:503,body:{error:'GPU observation MCP transport unavailable'}};

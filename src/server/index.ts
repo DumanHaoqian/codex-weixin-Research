@@ -19,6 +19,10 @@ import { isCurrentRuntimeInstallable, UpdateManager } from "./update-manager.js"
 import { AutomationRuntime } from "../automation/runtime.js";
 import { handleWeixinAutomation } from "../automation/weixin-commands.js";
 import { createGpuTransport } from '../automation/gpu-transport.js';
+import { createResearchTransport } from '../automation/research-transport.js';
+import { ResponsesAnalysisPort } from '../automation/agent.js';
+import { CodexAnalysisPort,DefaultCodexAnalysisPort } from '../automation/codex-analysis.js';
+import { existingComputeMcp } from '../automation/compute-mcp.js';
 
 async function main(): Promise<void> {
   const launchCwd = process.cwd();
@@ -84,8 +88,17 @@ async function main(): Promise<void> {
         throw new Error('Remote automation access requires configured Web authentication');
       }
       automation = new AutomationRuntime(paths.root, {
+        research:{
+          analysis:process.env.CODEX_WEIXIN_CODEX_INFERENCE_UPSTREAM?
+            new CodexAnalysisPort(paths.root,loadConfig(paths).codexBin,process.env.CODEX_WEIXIN_CODEX_INFERENCE_UPSTREAM,process.env.CODEX_WEIXIN_ANALYSIS_MODEL):
+            process.env.CODEX_WEIXIN_ANALYSIS_URL&&process.env.CODEX_WEIXIN_ANALYSIS_MODEL?
+            new ResponsesAnalysisPort(process.env.CODEX_WEIXIN_ANALYSIS_URL,process.env.CODEX_WEIXIN_ANALYSIS_MODEL,()=>process.env.CODEX_WEIXIN_ANALYSIS_KEY):
+            new DefaultCodexAnalysisPort(paths.root,loadConfig(paths).codexBin),
+          remote:process.env.CODEX_WEIXIN_RESEARCH_HELPERS?createResearchTransport(paths.root,loadConfig(paths).codexBin,JSON.parse(process.env.CODEX_WEIXIN_RESEARCH_HELPERS),existingComputeMcp(paths.root)):undefined,
+          enableLiterature:process.env.CODEX_WEIXIN_LITERATURE==='1'
+        },
         gpu:process.env.CODEX_WEIXIN_AUTOMATION_GPU_SERVERS?.trim()?createGpuTransport(paths.root,loadConfig(paths).codexBin,
-          process.env.CODEX_WEIXIN_AUTOMATION_GPU_SERVERS.split(',').map(value=>value.trim()).filter(Boolean)):undefined,
+          process.env.CODEX_WEIXIN_AUTOMATION_GPU_SERVERS.split(',').map(value=>value.trim()).filter(Boolean),existingComputeMcp(paths.root)):undefined,
         send:(owner,text)=>accountManager.sendAutomationText(owner,text),
         authorize: (owner) => {
           const account = accountManager.listAccounts().find(item=>item.accountId===owner.accountId);
