@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>定时与科研 · Codex 微信</title>
+  <link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/automation.css">
+  <script defer src="/research-ui.js"></script><script defer src="/automation.js"></script>
+</head>
+<body>
+  <header><a href="/">← 微信工作台</a><span>CODEX / RESEARCH</span></header>
+  <main>
+    <div class="heading"><div><p class="eyebrow">AUTOMATIONS</p><h1>定时与科研</h1><p>把明确的计划交给后台，执行记录始终可查。</p></div><button id="refresh" type="button">刷新</button></div>
+    <p id="status" class="notice" role="status">正在检查调度服务…</p>
+    <p id="message" role="status" aria-live="polite"></p>
+    <section class="toolbar" aria-label="任务所有者">
+      <label>微信账号<select id="account"></select></label><label>接收人<select id="sender"></select></label>
+      <p>任务仅发给所选账号的已授权接收人。</p>
+    </section>
+    <div class="layout">
+      <section class="panel"><div class="panel-heading"><h2 id="form-title">新建提醒</h2><button type="button" id="reset">清空</button></div>
+        <form id="task-form">
+          <label>任务类型<select id="task-kind"><option value="reminder">提醒</option><option value="gpu_watch">GPU 占用监控</option><option value="agent_report">定时 Agent 报告</option><option value="research_workflow">训练 / 等卡 / 保留与交接</option><option value="job_monitor">跟踪已有实验</option><option value="result_compare">实验结果对比</option><option value="literature_watch">文献追踪</option></select></label>
+          <label>项目<select id="research-project"><option value="">通用任务</option></select></label>
+          <label>名称<input id="title" maxlength="120" required placeholder="例：检查今晚实验结果"></label>
+          <label>任务说明<textarea id="prompt" rows="4" maxlength="32000" required placeholder="执行内容、分析目标或需要检查的事项"></textarea></label>
+          <fieldset id="gpu-fields" hidden><legend>GPU 观测条件</legend>
+            <label>服务器<select id="gpu-server"></select></label>
+            <div class="fields"><label>监控分钟数<input id="gpu-duration" type="number" min="1" max="10080" value="60"></label><label>采样间隔（秒）<input id="gpu-period" type="number" min="5" max="3600" value="15"></label></div>
+            <div class="fields"><label>至少空闲显存（GiB）<input id="gpu-free" type="number" min="0" max="1000" value="0" step="0.1"></label><label>最多已用显存（MiB）<input id="gpu-used" type="number" min="0" max="100000" value="64"></label></div>
+            <label>连续满足次数<input id="gpu-stable" type="number" min="1" max="20" value="2"></label>
+            <p class="muted">只读监控；候选卡还须利用率为零且没有计算进程。不会占卡、启动训练或终止进程。时间计划决定何时开始，每次监控另有截止时间。</p>
+          </fieldset>
+          <fieldset id="agent-fields" hidden><legend>Agent 材料与分析</legend>
+            <label>模型（留空沿用 Codex）<input id="agent-model" maxlength="100"></label>
+            <label>项目内资料文件，每行一个相对路径<textarea id="agent-files" rows="3" placeholder="notes/experiment.md"></textarea></label>
+            <p class="muted">每次使用新的分析会话。只读取全局记忆及明确选中项目的材料；模型返回报告，不直接提交实验、占卡或写入记忆。</p>
+          </fieldset>
+          <fieldset id="remote-target-fields" hidden><legend>科研服务器</legend><label>已配置的服务器<select id="research-target"></select></label></fieldset>
+          <fieldset id="workflow-fields" hidden><legend>固定实验方案</legend>
+            <label>项目目录<input id="recipe-root" placeholder="/absolute/project/path"></label>
+            <label>解释器或程序的绝对路径<input id="recipe-executable" placeholder="/absolute/conda/env/bin/python"></label>
+            <label>参数，每行一个<textarea id="recipe-args" rows="4" placeholder="train.py&#10;--seed&#10;1"></textarea></label>
+            <label>代码版本<input id="recipe-version" value="latest_record" placeholder="latest_record 或 git:完整提交SHA"></label>
+            <label>环境引用<input id="recipe-env" value="default"></label>
+            <label>资源方式<select id="workflow-mode"><option value="immediate">满足资源条件后立即提交一次</option><option value="launch_when_ready">等待显卡后启动</option><option value="reserve_then_handoff">先保留显存，再交接训练</option></select></label>
+            <div class="fields"><label>GPU 数量<input id="job-gpus" type="number" min="0" max="8" value="1"></label><label>每卡最低空闲 GiB<input id="job-free" type="number" min="0" max="1000" value="1" step="0.1"></label></div>
+            <label>资源等待截止时间<input id="job-wait" type="datetime-local"></label>
+            <div id="reservation-fields" hidden>
+              <div class="fields"><label>每卡保留 GiB<input id="holder-gib" type="number" min="0.01" max="1000" value="1" step="0.01"></label><label>最多保留分钟<input id="hold-minutes" type="number" min="1" max="1440" value="30"></label></div>
+              <label class="duplicate-option"><input id="grant-reserve" type="checkbox">授权按上述数量和期限保留显存</label>
+              <label class="duplicate-option"><input id="handoff-auto" type="checkbox">确认保留成功后自动交接此固定实验；否则等待手动交接</label>
+            </div>
+            <label>指标文件（相对项目目录）<input id="metrics-file" value="metrics.json"></label>
+            <label>其他必需产物，每行一个相对路径<textarea id="required-files" rows="2"></textarea></label>
+            <label>监控间隔秒<input id="job-monitor-seconds" type="number" min="5" max="86400" value="900"></label>
+            <label>实验时长上限秒（可留空）<input id="job-runtime-seconds" type="number" min="1" max="2592000"></label>
+            <div class="fields"><label>已知失败后重试次数<input id="job-retries" type="number" min="0" max="4" value="0"></label><label>最多实验提交次数<input id="job-submit-budget" type="number" min="1" max="5" value="1"></label></div>
+            <label class="duplicate-option"><input id="grant-submit" type="checkbox">授权按此固定方案提交实验</label>
+            <label class="duplicate-option"><input id="grant-stop" type="checkbox">允许通过核实作业身份停止本实验</label>
+            <p class="muted">默认不自动从头重训。解释器、目录和环境还须符合远端已安装 helper 的策略。占显存不保证整卡排他；未核实的操作不会自动重放。</p>
+          </fieldset>
+          <fieldset id="job-monitor-fields" hidden><legend>已有实验监控</legend><label>远端 helper 作业 ID<input id="attach-job-id"></label><label>检查间隔秒<input id="attach-period" type="number" min="5" max="86400" value="900"></label><label>监控天数<input id="attach-days" type="number" min="1" max="30" value="7"></label><p class="muted">只附加同一所有者且有可核实身份的作业。停止监控不等于停止训练。</p></fieldset>
+          <fieldset id="comparison-fields" hidden><legend>实验对比</legend><label>作业 ID，每行一个<textarea id="compare-jobs" rows="3"></textarea></label><label>Baseline 作业 ID<input id="baseline-job"></label><p class="muted">从已保存并验证的指标读取。数据划分、指标定义或评估流程不一致时会标明不可比。</p></fieldset>
+          <fieldset id="literature-fields" hidden><legend>文献追踪</legend><label>检索式<input id="paper-query" placeholder="all:medical imaging"></label><label class="duplicate-option"><input id="source-crossref" type="checkbox" checked>Crossref 元数据</label><label class="duplicate-option"><input id="source-arxiv" type="checkbox" checked>arXiv 元数据与摘要</label><label>首次回溯天数<input id="paper-days" type="number" min="1" max="365" value="14"></label><p class="muted">保存增量游标，区分已发现和通知状态。仅有元数据或摘要时不会声称阅读全文。</p></fieldset>
+          <div class="fields"><label>重复方式<select id="schedule"><option value="once">一次性</option><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">固定间隔</option></select></label>
+            <label>时区<input id="timezone" value="Asia/Shanghai" required></label></div>
+          <label id="once-field">日期与时间<input id="at" type="datetime-local" required></label>
+          <label id="time-field" hidden>当地时间<input id="time" type="time" value="09:00"></label>
+          <fieldset id="week-field" hidden><legend>星期</legend><div class="weekdays">
+            <label><input type="checkbox" name="weekday" value="1" checked>一</label><label><input type="checkbox" name="weekday" value="2">二</label><label><input type="checkbox" name="weekday" value="3">三</label><label><input type="checkbox" name="weekday" value="4">四</label><label><input type="checkbox" name="weekday" value="5">五</label><label><input type="checkbox" name="weekday" value="6">六</label><label><input type="checkbox" name="weekday" value="7">日</label>
+          </div></fieldset>
+          <label id="interval-field" hidden>每隔多少分钟<input id="interval" type="number" min="5" max="525600" value="30"></label>
+          <label>通知<select id="notification"><option value="always">执行后通知我</option><option value="findings_or_failure">仅有发现、状态变化或失败时通知</option><option value="muted">仅保留记录</option></select></label>
+          <div class="actions"><button id="save" class="primary" type="submit">保存任务</button><button id="preview" type="button">预览时间</button></div>
+          <p id="preview-times" class="muted"></p>
+        </form>
+      </section>
+      <section class="panel"><div class="panel-heading"><h2>任务</h2><span id="task-count" class="muted"></span></div><div id="tasks" aria-live="polite"></div><nav id="tasks-pages" class="actions" aria-label="任务分页"></nav></section>
+    </div>
+    <section class="panel records"><div class="panel-heading"><h2>GPU 监控</h2><span class="muted">仅在变化、异常和到期时通知</span></div><p class="muted">暂停计划只阻止新的监控；“停止监控”停止采样，删除任务也会停止采样。已有训练保持运行。过期读数只作历史参考。</p><div id="gpu-watches"></div></section>
+    <section class="panel records"><div class="panel-heading"><h2>科研流程与实验</h2><span class="muted">提交、资源、运行和验证分别记录</span></div><div id="research-workflows"></div><nav id="research-workflows-pages" class="actions" aria-label="科研流程分页"></nav><div id="research-objects"></div><nav id="research-objects-pages" class="actions" aria-label="实验与保留分页"></nav></section>
+    <section class="panel records"><div class="panel-heading"><h2>报告与文献</h2><span class="muted">可下载的结构化证据</span></div><div class="records-grid"><div><div id="research-artifacts"></div><nav id="research-artifacts-pages" class="actions" aria-label="报告分页"></nav></div><div><div id="research-papers"></div><nav id="research-literature-pages" class="actions" aria-label="文献分页"></nav></div></div></section>
+    <section class="panel records"><div class="panel-heading"><h2>执行与通知</h2><span class="muted">每页 50 条，可翻页查看历史</span></div>
+      <p class="muted">“API 已接受”表示微信接口接受请求，实际送达尚未确认。重发未知或已接受的消息可能重复；重发不会重新执行任务。</p>
+      <label class="duplicate-option"><input id="allow-duplicate" type="checkbox">允许重发未知或已接受的通知（可能重复）</label>
+      <div class="records-grid"><div><h3>执行记录</h3><div id="runs"></div><nav id="runs-pages" class="actions" aria-label="执行记录分页"></nav></div><div><h3>通知</h3><div id="notifications"></div><nav id="notifications-pages" class="actions" aria-label="通知分页"></nav></div></div>
+    </section>
+    <details class="panel"><summary>当前支持范围与服务设置</summary><p>支持提醒、定时分析、GPU 监控、固定实验方案、结果对比和文献追踪。远程实验和保留需要配置 MCP、固定 helper 及远端策略；文献来源须启用。能力未配置时会明确拒绝激活。</p><p>需使用本分支构建运行，并设置 <code>CODEX_WEIXIN_AUTOMATION=1</code> 后重启该服务。关闭网页不影响调度；电脑关机或退出桥接后，本地计划不能执行。远端已启动作业继续运行，纯保留进程按远端期限释放。</p><p>微信也可使用 <code>/tasks help</code>、<code>/jobs</code>、<code>/results</code> 和 <code>/papers</code>。</p></details>
+  </main>
+</body>
+</html>

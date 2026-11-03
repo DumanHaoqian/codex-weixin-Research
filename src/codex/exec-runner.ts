@@ -2,21 +2,27 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import type { CodexExecSandbox } from "./sandbox.js";
+import type { CodexApprovalPolicy, CodexExecSandbox } from "./sandbox.js";
 
 export type BuildCodexExecArgsInput = {
   prompt: string;
   cwd: string;
   threadId?: string;
   sandbox?: CodexExecSandbox;
+  approvalPolicy?: CodexApprovalPolicy;
   model?: string;
   effort?: string;
+  ephemeral?: boolean;
   onDelta?: (delta: string) => Promise<void> | void;
   onProgress?: (message: string) => Promise<void> | void;
 };
 
 export function buildCodexExecArgs(input: BuildCodexExecArgsInput): string[] {
+  if (input.ephemeral && input.threadId) {
+    throw new Error("ephemeral Codex runs cannot resume a persistent thread");
+  }
   const runtimeArgs = [
+    ...(input.approvalPolicy ? ["-c", `approval_policy=${JSON.stringify(input.approvalPolicy)}`] : []),
     ...(input.model ? ["--model", input.model] : []),
     ...(input.effort ? ["-c", `model_reasoning_effort=${JSON.stringify(input.effort)}`] : [])
   ];
@@ -38,6 +44,7 @@ export function buildCodexExecArgs(input: BuildCodexExecArgsInput): string[] {
   }
   return [
     "exec",
+    ...(input.ephemeral ? ["--ephemeral"] : []),
     "--skip-git-repo-check",
     ...(input.sandbox ? ["--sandbox", input.sandbox] : []),
     ...runtimeArgs,
@@ -49,6 +56,7 @@ export function buildCodexExecArgs(input: BuildCodexExecArgsInput): string[] {
 export type CodexExecRunnerOptions = {
   codexBin?: string;
   sandbox?: CodexExecSandbox;
+  approvalPolicy?: CodexApprovalPolicy;
   timeoutMs?: number;
 };
 
@@ -56,6 +64,7 @@ export type CodexRunResult = {
   text: string;
   threadId?: string;
   raw: string;
+  usedExecFallback?: boolean;
 };
 
 export class CodexExecRunner {
@@ -68,6 +77,7 @@ export class CodexExecRunner {
     const timeoutMs = this.options.timeoutMs ?? 600_000;
     const args = buildCodexExecArgs({
       ...input,
+      approvalPolicy: this.options.approvalPolicy ?? input.approvalPolicy,
       sandbox: this.options.sandbox ?? input.sandbox
     });
 
@@ -114,6 +124,10 @@ export class CodexExecRunner {
     });
   }
 
+  runIsolated(input: Omit<BuildCodexExecArgsInput, "threadId" | "ephemeral">): Promise<CodexRunResult> {
+    return this.run({ ...input, ephemeral: true });
+  }
+
   async stop(threadId?: string): Promise<void> {
     const target = threadId
       ? [...this.activeRuns].reverse().find((run) => run.threadId === threadId)
@@ -134,7 +148,7 @@ export function formatCodexExecFailure(code: number | null, stderr: string): Err
   if (/CreateProcessAsUserW failed:\s*1312/i.test(detail)) {
     return new Error(
       `${base}\nWindows background sandbox startup failed. ` +
-      `Set "codexExecSandbox": "danger-full-access" in ~/.codex-weixin/config.json only if you accept full access to this machine.`
+      `Set "codexExecSandbox": "danger-full-access" in ~/.codex-weixin-bridge/config.json only if you accept full access to this machine.`
     );
   }
   return new Error(base);

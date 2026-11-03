@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -122,10 +123,18 @@ test("local API redacts credentials and protects mutations", async (t) => {
   };
   assert.equal(bootstrap.product, "codex-weixin");
   assert.equal(bootstrap.version, "9.8.7");
+  const statusResponse = await fetch(`${server.url}/api/runtime-status`);
+  assert.equal(statusResponse.status, 200);
+  assert.match(statusResponse.headers.get("cache-control") ?? "", /no-store/);
+  assert.deepEqual(await statusResponse.json(), { version: "9.8.7", requestToken: bootstrap.requestToken });
   assert.equal(bootstrap.accounts[0].token, undefined);
-  assert.deepEqual(bootstrap.codex, { ready: true, version: "codex-cli test" });
-  assert.deepEqual(bootstrap.codexRuntime, { model: "runtime-model", effort: "high" });
-  assert.deepEqual(bootstrap.codexModels.map((model) => model.model), ["runtime-model"]);
+  assert.equal(bootstrap.codex, null);
+  const codexResponse = await fetch(`${server.url}/api/codex-status`);
+  assert.equal(codexResponse.status, 200);
+  const codexStatus = await codexResponse.json() as typeof bootstrap;
+  assert.deepEqual(codexStatus.codex, { ready: true, version: "codex-cli test" });
+  assert.deepEqual(codexStatus.codexRuntime, { model: "runtime-model", effort: "high" });
+  assert.deepEqual(codexStatus.codexModels.map((model) => model.model), ["runtime-model"]);
   assert.equal(JSON.stringify(bootstrap).includes("must-never-reach-browser"), false);
 
   const pageResponse = await fetch(server.url);
@@ -133,11 +142,15 @@ test("local API redacts credentials and protects mutations", async (t) => {
   assert.match(pageHtml, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml">/);
   assert.match(
     pageHtml,
-    /href="https:\/\/github\.com\/XavierJiezou\/codex-weixin" target="_blank" rel="noopener noreferrer"/
+    /href="https:\/\/github\.com\/MrGaoGang\/codex-weixin-bridge" target="_blank" rel="noopener noreferrer"/
   );
   assert.match(pageHtml, /id="updateCheckButton"/);
   assert.match(pageHtml, /id="removeAccountDialog"/);
   assert.match(pageHtml, /重新扫码后恢复/);
+  assert.match(pageHtml, /class="brand-logo" src="\/logo-96\.png" srcset="\/logo-192\.png 2x"/);
+  const logoResponse = await fetch(`${server.url}/logo-96.png`);
+  assert.equal(logoResponse.status, 200);
+  assert.equal(logoResponse.headers.get("content-type"), "image/png");
   const faviconResponse = await fetch(`${server.url}/favicon.svg`);
   assert.equal(faviconResponse.status, 200);
   assert.match(faviconResponse.headers.get("content-type") ?? "", /^image\/svg\+xml/);
@@ -450,4 +463,205 @@ test("session attachments use scoped URLs and support video byte ranges", async 
   assert.equal(rangeResponse.headers.get("content-type"), "video/mp4");
   assert.equal(rangeResponse.headers.get("content-range"), "bytes 2-5/10");
   assert.equal(await rangeResponse.text(), "2345");
+});
+
+test("remote binding accepts configured hosts and same-origin mutations only", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-remote-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const server = await startLocalHttpServer({
+    paths: resolveStatePaths(root),
+    accountManager: { async removeAccount() {} } as never,
+    host: "0.0.0.0",
+    allowedHosts: ["203.0.113.10", "Bridge.Example", "http://proxy.example:8888", "default-port.example:80", "[2001:db8::1]", "2001:db8::2", "https://secure-proxy.example"],
+    port: 0
+  });
+  t.after(() => server.close());
+  const port = new URL(server.url).port;
+  const endpoint = `http://127.0.0.1:${port}`;
+  const remoteHost = `203.0.113.10:${port}`;
+  const remoteFetch = (url: string, options: { method?: string; headers: Record<string, string> }) =>
+    new Promise<{ status: number }>((resolve, reject) => {
+      const request = http.request(url, options, (response) => {
+        response.resume();
+        response.on("end", () => resolve({ status: response.statusCode! }));
+      });
+      request.on("error", reject);
+      request.end();
+    });
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: remoteHost } })).status, 200);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: `bridge.example:${port}` } })).status, 200);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: "proxy.example:8888" } })).status, 200);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: "proxy.example:9999" } })).status, 403);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: `evil.example:${port}` } })).status, 403);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: "default-port.example" } })).status, 200);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: `[2001:db8::1]:${port}` } })).status, 200);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: `[2001:db8::2]:${port}` } })).status, 200);
+  // Bare configured names work both directly and behind default-port reverse proxies.
+  for (const host of ["bridge.example", "BRIDGE.EXAMPLE:80", "bridge.example:443", "203.0.113.10", "203.0.113.10:443", "[2001:db8::1]", "[2001:db8::2]:80"]) {
+    assert.equal((await remoteFetch(endpoint, { headers: { Host: host } })).status, 200, host);
+  }
+  for (const host of ["bridge.example:9999", "bridge.example.evil", "proxy.example", "default-port.example:443", "[2001:db8::2]:9999"]) {
+    assert.equal((await remoteFetch(endpoint, { headers: { Host: host } })).status, 403, host);
+  }
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: "secure-proxy.example" } })).status, 200);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: "secure-proxy.example:443" } })).status, 200);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: "secure-proxy.example:80" } })).status, 403);
+  assert.equal((await remoteFetch(endpoint, { headers: { Host: `localhost:443` } })).status, 403);
+  const proxyMutation = (host: string, origin: string) => remoteFetch(`${endpoint}/api/accounts/test`, {
+    method: "DELETE", headers: { Host: host, Origin: origin, "X-Codex-Weixin-Token": server.requestToken }
+  });
+  assert.equal((await proxyMutation("BRIDGE.EXAMPLE:443", "https://bridge.example")).status, 200);
+  assert.equal((await proxyMutation("bridge.example", "https://BRIDGE.EXAMPLE:443")).status, 200);
+  assert.equal((await proxyMutation("bridge.example:80", "http://bridge.example")).status, 200);
+  assert.equal((await proxyMutation("[2001:db8::2]:443", "https://[2001:db8::2]")).status, 200);
+  assert.equal((await proxyMutation("bridge.example", "https://bridge.example:9999")).status, 403);
+  assert.equal((await proxyMutation("bridge.example", "https://bridge.example.evil")).status, 403);
+  assert.equal((await proxyMutation("bridge.example", "https://bridge.example/path")).status, 403);
+  const mutate = (origin: string, token = server.requestToken) => remoteFetch(`${endpoint}/api/accounts/test`, {
+    method: "DELETE",
+    headers: { Host: remoteHost, Origin: origin, "X-Codex-Weixin-Token": token }
+  });
+  assert.equal((await mutate(`http://${remoteHost}`)).status, 200);
+  assert.equal((await mutate(`https://${remoteHost}`)).status, 200);
+  assert.equal((await mutate(`http://evil.example:${port}`)).status, 403);
+  assert.equal((await mutate(`http://${remoteHost}`, "wrong")).status, 403);
+});
+
+test("HTTP authentication protects pages, assets and API requests", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-auth-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let deletions = 0;
+  const server = await startLocalHttpServer({
+    paths: resolveStatePaths(root),
+    accountManager: { async removeAccount() { deletions++; } } as never,
+    port: 0,
+    username: "管理员",
+    password: "secret:password"
+  });
+  t.after(() => server.close());
+  const authorization = (value: string) => `Basic ${Buffer.from(value).toString("base64")}`;
+  for (const pathname of ["/app.js", "/api/bootstrap", "/api/runtime-status", "/api/codex-status", "/api/sessions/a/b/messages/c/attachments/0"]) {
+    for (const value of [undefined, authorization("管理员:wrong"), authorization("wrong:secret:password"), "Bearer invalid", "Basic !!!"]) {
+      const response = await fetch(`${server.url}${pathname}`, {
+        headers: value ? { Authorization: value } : {}
+      });
+      assert.equal(response.status, 401);
+      assert.equal(response.headers.get("www-authenticate"), null);
+      assert.equal((await response.text()).includes(server.requestToken), false);
+    }
+  }
+  const headers = { Authorization: authorization("管理员:secret:password") };
+  assert.equal((await fetch(server.url, { headers })).status, 200);
+  const endpoint = `${server.url}/api/accounts/test`;
+  assert.equal((await fetch(endpoint, { method: "DELETE", headers })).status, 403);
+  assert.equal((await fetch(endpoint, {
+    method: "DELETE",
+    headers: { ...headers, Origin: server.url, "X-Codex-Weixin-Token": server.requestToken }
+  })).status, 200);
+  assert.equal((await fetch(endpoint, {
+    method: "DELETE",
+    headers: { Origin: server.url, "X-Codex-Weixin-Token": server.requestToken }
+  })).status, 401);
+  assert.equal(deletions, 1);
+});
+
+test("HTTP authentication rejects incomplete or unusable credentials before listening", async () => {
+  for (const credentials of [
+    { username: "admin" }, { password: "secret" },
+    { username: "", password: "secret" }, { username: "admin", password: "" },
+    { username: "admin:name", password: "secret" }
+  ]) {
+    await assert.rejects(startLocalHttpServer({
+      paths: resolveStatePaths(os.tmpdir()), accountManager: {} as never, port: 0,
+      ...credentials
+    }), /CODEX_WEIXIN_USERNAME.*CODEX_WEIXIN_PASSWORD/);
+  }
+});
+
+test("Web config persists and clears permissions and rejects invalid approval policies", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-permissions-api-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  saveConfig(paths, defaultConfig(root));
+  let restarts = 0;
+  const server = await startLocalHttpServer({ paths, port: 0,
+    accountManager: { async restartRunning() { restarts++; } } as never,
+    codexRuntimeCheck: async () => ({}), codexModelsCheck: async () => [] });
+  t.after(() => server.close());
+  const update = (policy: string | null) => fetch(`${server.url}/api/config`, {
+    method: "PUT", headers: { "Content-Type": "application/json", Origin: server.url,
+      "X-Codex-Weixin-Token": server.requestToken },
+    body: JSON.stringify({ defaultCwd: root, allowedWorkspaces: [root], codexBackend: "auto",
+      codexExecSandbox: "danger-full-access", codexApprovalPolicy: policy }) });
+  const saved = await update("never");
+  assert.equal(saved.status, 200);
+  const config = (await saved.json()).config;
+  assert.equal(config.codexApprovalPolicy, "never");
+  assert.equal(config.codexExecSandbox, "danger-full-access");
+  const invalid = await update("always");
+  assert.equal(invalid.status, 400);
+  assert.equal(restarts, 1);
+  const cleared = await update(null);
+  assert.equal(cleared.status, 200);
+  assert.equal((await cleared.json()).config.codexApprovalPolicy, undefined);
+});
+
+test("password login serves a dialog and authenticates using an HttpOnly session cookie", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-login-ui-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const server = await startLocalHttpServer({ paths: resolveStatePaths(root), port: 0,
+    accountManager: {} as never, username: "管理员", password: "secret:password" });
+  t.after(() => server.close());
+  const page = await fetch(server.url);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /id="passwordLoginDialog"/);
+  const login = (password: string, origin = server.url) => fetch(`${server.url}/api/auth/login`, {
+    method: "POST", headers: { "Content-Type": "application/json", Origin: origin },
+    body: JSON.stringify({ username: "管理员", password }) });
+  assert.equal((await login("wrong")).status, 401);
+  assert.equal((await login("secret:password", "https://evil.example")).status, 403);
+  const response = await login("secret:password");
+  assert.equal(response.status, 200);
+  const cookie = response.headers.get("set-cookie") ?? "";
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /SameSite=Strict/);
+  const home = await fetch(server.url, { headers: { Cookie: cookie.split(";")[0] } });
+  assert.equal(home.status, 200);
+  assert.match(await home.text(), /id="accountsList"/);
+  const tampered = await fetch(`${server.url}/app.js`, { headers: { Cookie: cookie.split(";")[0] + "x" } });
+  assert.equal(tampered.status, 401);
+});
+
+test("runtime status responds without consulting Codex or account services", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-runtime-status-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const unexpected = async () => { throw new Error("runtime polling must not probe Codex"); };
+  const server = await startLocalHttpServer({
+    paths: resolveStatePaths(root), accountManager: {} as never, port: 0,
+    productVersion: "2.0.0", codexCheck: unexpected, codexRuntimeCheck: unexpected, codexModelsCheck: unexpected
+  });
+  t.after(() => server.close());
+  const response = await fetch(`${server.url}/api/runtime-status`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { version: "2.0.0", requestToken: server.requestToken });
+});
+
+test("bootstrap delivers accounts and settings without waiting for Codex detection", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-fast-bootstrap-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let probes = 0;
+  const probe = async () => { probes += 1; throw new Error("Codex unavailable"); };
+  const server = await startLocalHttpServer({
+    paths: resolveStatePaths(root), port: 0,
+    accountManager: { listAccounts: () => [], listSessions: () => [] } as never,
+    codexCheck: probe, codexRuntimeCheck: probe, codexModelsCheck: probe
+  });
+  t.after(() => server.close());
+  const response = await fetch(`${server.url}/api/bootstrap`);
+  assert.equal(response.status, 200);
+  const data = await response.json() as Record<string, unknown>;
+  assert.deepEqual(data.accounts, []);
+  assert.ok(data.config);
+  assert.equal(data.codex, null);
+  assert.equal(probes, 0);
 });

@@ -1,11 +1,22 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 
 import { resolveCodexCommand, type CodexRunResult } from "./exec-runner.js";
 
+import type { CodexApprovalPolicy, CodexExecSandbox } from "./sandbox.js";
+
 export type AppServerRunnerOptions = {
+  sandbox?: CodexExecSandbox;
+  approvalPolicy?: CodexApprovalPolicy;
   codexBin?: string;
   requestTimeoutMs?: number;
+  disableHooks?: boolean;
+  startupConfig?:Record<string,unknown>;
+  threadConfig?:Record<string,unknown>;
+  ephemeral?:boolean;
+  ownProcessGroup?:boolean;
+  spawnEnv?:NodeJS.ProcessEnv;
+  verifyReadOnly?:boolean;
 };
 
 export type CodexRunnerInput = {
@@ -91,6 +102,8 @@ type WireMessage = {
 
 export class AppServerCodexRunner {
   private child?: ChildProcessWithoutNullStreams;
+  private childClosePromise?: Promise<void>;
+  private activeRunCount = 0;
   private lines?: readline.Interface;
   private connectPromise?: Promise<void>;
   private initialized = false;
@@ -112,57 +125,115 @@ export class AppServerCodexRunner {
   constructor(private readonly options: AppServerRunnerOptions = {}) {}
 
   async run(input: CodexRunnerInput): Promise<CodexRunResult> {
-    await this.ensureConnected();
+    this.activeRunCount += 1;
+    try {
+      await this.ensureConnected();
 
-    const threadResponse = await this.request(
-      input.threadId ? "thread/resume" : "thread/start",
-      compactObject({
-        ...(input.threadId ? { threadId: input.threadId } : {}),
-        cwd: input.cwd,
-        model: input.model,
-        approvalPolicy: "never"
-      })
-    ) as Record<string, unknown>;
-    const thread = threadResponse.thread as Record<string, unknown> | undefined;
-    const threadId = typeof thread?.id === "string" ? thread.id : input.threadId;
-    if (!threadId) {
-      throw new Error("Codex app-server did not return a thread id");
-    }
-    this.runtimeInfoByThread.set(threadId, runtimeInfoFromThreadResponse(threadResponse));
-
-    const turnResponse = await this.request("turn/start", compactObject({
-      threadId,
-      input: [{ type: "text", text: input.prompt, text_elements: [] }],
-      cwd: input.cwd,
-      approvalPolicy: "never",
-      model: input.model,
-      effort: input.effort
-    })) as Record<string, unknown>;
-    const turn = turnResponse.turn as Record<string, unknown> | undefined;
-    const turnId = typeof turn?.id === "string" ? turn.id : undefined;
-    if (!turnId) {
-      throw new Error("Codex app-server did not return a turn id");
-    }
-
-    this.activeTurns.set(threadId, turnId);
-    if (input.onDelta || input.onProgress) {
-      const key = turnKey(threadId, turnId);
-      this.turnStreams.set(key, {
-        onDelta: input.onDelta,
-        onProgress: input.onProgress,
-        chain: Promise.resolve()
-      });
-      for (const event of this.queuedTurnEvents.get(key) ?? []) {
-        this.enqueueTurnEvent(key, event);
+      const threadResponse = await this.request(
+        input.threadId ? "thread/resume" : "thread/start",
+        compactObject({
+          ...(input.threadId ? { threadId: input.threadId } : {}),
+          cwd: input.cwd,
+          sandbox: this.options.sandbox,
+          model: input.model,
+          approvalPolicy: this.options.approvalPolicy ?? "never"
+          ,config:this.options.threadConfig,ephemeral:this.options.ephemeral
+        })
+      ) as Record<string, unknown>;
+      const thread = threadResponse.thread as Record<string, unknown> | undefined;
+      if(this.options.verifyReadOnly&&((threadResponse.sandbox as any)?.type!=='readOnly'||threadResponse.approvalPolicy!=='never'))throw new Error('Analysis session isolation could not be verified');
+      const threadId = typeof thread?.id === "string" ? thread.id : input.threadId;
+      if (!threadId) {
+        throw new Error("Codex app-server did not return a thread id");
       }
-      this.queuedTurnEvents.delete(key);
+      this.runtimeInfoByThread.set(threadId, runtimeInfoFromThreadResponse(threadResponse));
+
+      const turnResponse = await this.request("turn/start", compactObject({
+        threadId,
+        input: [{ type: "text", text: input.prompt, text_elements: [] }],
+        cwd: input.cwd,
+        approvalPolicy: this.options.approvalPolicy ?? "never",
+        model: input.model,
+        sandboxPolicy: this.options.sandbox ? {
+          type: { "read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess" }[this.options.sandbox],
+          ...(this.options.sandbox === "workspace-write" ? { writableRoots: [input.cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } : {})
+        } : undefined,
+        effort: input.effort
+      })) as Record<string, unknown>;
+      const turn = turnResponse.turn as Record<string, unknown> | undefined;
+      const turnId = typeof turn?.id === "string" ? turn.id : undefined;
+      if (!turnId) {
+        throw new Error("Codex app-server did not return a turn id");
+      }
+
+      this.activeTurns.set(threadId, turnId);
+      if (input.onDelta || input.onProgress) {
+        const key = turnKey(threadId, turnId);
+        this.turnStreams.set(key, {
+          onDelta: input.onDelta,
+          onProgress: input.onProgress,
+          chain: Promise.resolve()
+        });
+        for (const event of this.queuedTurnEvents.get(key) ?? []) {
+          this.enqueueTurnEvent(key, event);
+        }
+        this.queuedTurnEvents.delete(key);
+      }
+      return await this.waitForTurn(threadId, turnId);
+    } finally {
+      this.activeRunCount -= 1;
     }
-    return this.waitForTurn(threadId, turnId);
   }
 
   async listSessions(): Promise<unknown> {
     await this.ensureConnected();
     return this.request("thread/list", {});
+  }
+
+  // Deterministic automation collectors never start a model turn. Keep this
+  // session separate from chat, and retain the existing approval-denial handler.
+  async openObservationSession(cwd: string): Promise<string> {
+    await this.ensureConnected();
+    const response = await this.request('thread/start', {
+      cwd, sandbox:'read-only', approvalPolicy:'never', ephemeral:true,
+      config:{'features.hooks':false}
+    }) as Record<string, unknown>;
+    const thread=response.thread as Record<string, unknown> | undefined;
+    const sandbox=response.sandbox as Record<string, unknown> | undefined;
+    if(typeof thread?.id!=='string'||response.approvalPolicy!=='never'||sandbox?.type!=='readOnly')
+      throw new Error('Read-only MCP observation session could not be verified');
+    return thread.id;
+  }
+
+  async callObservationTool(threadId: string, tool:'servers_list'|'ssh_exec', args:Record<string,unknown>,server='compute-server-management'):Promise<unknown>{
+    await this.ensureConnected();
+    return this.request('mcpServer/tool/call',{threadId,server,tool,arguments:args},45_000);
+  }
+
+  async observationInventory(threadId:string):Promise<unknown>{
+    await this.ensureConnected();return this.request('mcpServerStatus/list',{threadId,limit:100});
+  }
+
+  async disableAnalysisMcp(cwd:string):Promise<void>{
+    await this.ensureConnected();
+    const response=await this.request('config/read',{cwd,includeLayers:false}) as any;
+    const servers=response.config?.mcp_servers??{};
+    if(!servers||typeof servers!=='object'||Array.isArray(servers))throw new Error('Analysis MCP configuration cannot be verified');
+    this.options.threadConfig??={};
+    for(const name of Object.keys(servers)){
+      if(!/^[a-zA-Z0-9_-]+$/.test(name))throw new Error('Analysis cannot safely override this MCP configuration key');
+      this.options.threadConfig[`mcp_servers.${name}.enabled`]=false;
+    }
+  }
+
+  async analysisDefaults(cwd:string):Promise<{model?:string;upstream:string}>{
+    await this.ensureConnected();
+    const response=await this.request('config/read',{cwd,includeLayers:false}) as any;
+    if(response.config?.model_provider&&response.config.model_provider!=='openai')throw new Error('Custom model providers require an explicit scheduled inference upstream');
+    const auth=await this.request('account/read',{refreshToken:false}) as any;
+    const type=auth.account?.type;
+    if(!['chatgpt','apiKey'].includes(type))throw new Error('Codex authentication unavailable');
+    return {model:response.config?.model,upstream:type==='chatgpt'?'https://chatgpt.com/backend-api/codex/responses':'https://api.openai.com/v1/responses'};
   }
 
   async getHistory(threadId: string): Promise<CodexHistoryMessage[]> {
@@ -242,6 +313,25 @@ export class AppServerCodexRunner {
     this.failTransport(new Error("Codex app-server runner closed"), true);
   }
 
+  async closeAndWait(): Promise<boolean> {
+    if (this.activeRunCount > 0) {
+      return false;
+    }
+    const childClosePromise = this.childClosePromise;
+    this.close();
+    await childClosePromise;
+    return true;
+  }
+
+  async terminateAutomation():Promise<void>{
+    const child=this.child,closed=this.childClosePromise;
+    if(child?.pid&&child.exitCode===null&&this.options.ownProcessGroup){
+      if(process.platform==='win32')await new Promise<void>(resolve=>execFile('taskkill.exe',['/PID',String(child.pid),'/T','/F'],{windowsHide:true,timeout:5000},()=>resolve()));
+      else try{process.kill(-child.pid,'SIGKILL');}catch{}
+    }
+    this.close();await closed;
+  }
+
   private async ensureConnected(): Promise<void> {
     if (this.closed) {
       throw new Error("Codex app-server runner is closed");
@@ -259,12 +349,21 @@ export class AppServerCodexRunner {
 
   private async startAppServer(): Promise<void> {
     const command = resolveCodexCommand(this.options.codexBin ?? "codex");
-    const child = spawn(command.command, [...command.argsPrefix, "app-server", "--stdio"], {
+    const permissionArgs = [
+      ...(this.options.sandbox ? ["-c", `sandbox_mode=${JSON.stringify(this.options.sandbox)}`] : []),
+      ...(this.options.approvalPolicy ? ["-c", `approval_policy=${JSON.stringify(this.options.approvalPolicy)}`] : []),
+      ...(this.options.disableHooks ? ['-c','features.hooks=false'] : [])
+      ,...Object.entries(this.options.startupConfig??{}).flatMap(([key,value])=>['-c',`${key}=${JSON.stringify(value)}`])
+    ];
+    const child = spawn(command.command, [...command.argsPrefix, "app-server", "--stdio", ...permissionArgs], {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       windowsHide: true
+      ,detached:Boolean(this.options.ownProcessGroup&&process.platform!=='win32')
+      ,env:this.options.spawnEnv
     });
     this.child = child;
+    this.childClosePromise = new Promise<void>((resolve) => child.once("close", () => resolve()));
     this.stderr = "";
     this.lines = readline.createInterface({ input: child.stdout });
     this.lines.on("line", (line) => this.handleMessage(line));

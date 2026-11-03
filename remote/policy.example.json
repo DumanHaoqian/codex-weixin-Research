@@ -1,0 +1,10 @@
+{
+  "allowedRoots": ["/absolute/authorized/project"],
+  "executables": ["/absolute/canonical/python"],
+  "environments": {"default": {"PYTHONUNBUFFERED": "1"}},
+  "maxGpuCount": 1,
+  "reservationPython": "/absolute/canonical/python",
+  "maxHolderBytes": 67108864,
+  "maxProcessGpuBytes": 268435456,
+  "maxHoldSeconds": 60
+}

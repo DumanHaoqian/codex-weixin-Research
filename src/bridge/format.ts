@@ -1,4 +1,5 @@
 import type { PromptBufferItem } from "./prompt-buffer.js";
+import { stripMemoryContext } from "./memory.js";
 
 const BRIDGE_ACTION_INSTRUCTIONS = [
   "WeChat bridge rule: when you need to send a local image, video, or file to the user, do not use Markdown local file links.",
@@ -58,7 +59,7 @@ export function buildPromptPreview(text: string, attachments: PromptPreviewItem[
 }
 
 export function parsePrompt(text: string): { text: string; attachments: PromptAttachment[] } {
-  let normalized = text.trim();
+  let normalized = stripMemoryContext(text.trim());
   for (const instructions of [BRIDGE_ACTION_INSTRUCTIONS, LEGACY_BRIDGE_ACTION_INSTRUCTIONS]) {
     if (normalized.startsWith(instructions)) {
       normalized = normalized.slice(instructions.length).trim();

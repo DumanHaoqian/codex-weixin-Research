@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
 
+const CHANNEL_VERSION = "0.0.33";
+const CLIENT_VERSION = "33";
+
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export type WeixinApiClientOptions = {
@@ -44,6 +47,7 @@ export class WeixinApiClient {
     toUserId: string;
     text: string;
     contextToken?: string;
+    runId?: string;
   }): Promise<{ messageId: string }> {
     const clientId = crypto.randomUUID();
     const body = {
@@ -51,6 +55,7 @@ export class WeixinApiClient {
         from_user_id: "",
         to_user_id: input.toUserId,
         client_id: clientId,
+        run_id: input.runId ?? `codex-${crypto.randomUUID()}`,
         message_type: 2,
         message_state: 2,
         ...(input.contextToken ? { context_token: input.contextToken } : {}),
@@ -115,6 +120,7 @@ export class WeixinApiClient {
     aesKeyBase64: string;
     plainSize: number;
     contextToken?: string;
+    runId?: string;
   }): Promise<{ messageId: string }> {
     const clientId = crypto.randomUUID();
     const response = await this.post("ilink/bot/sendmessage", {
@@ -122,6 +128,7 @@ export class WeixinApiClient {
         from_user_id: "",
         to_user_id: input.toUserId,
         client_id: clientId,
+        run_id: input.runId ?? `codex-${crypto.randomUUID()}`,
         message_type: 2,
         message_state: 2,
         ...(input.contextToken ? { context_token: input.contextToken } : {}),
@@ -149,6 +156,7 @@ export class WeixinApiClient {
     aesKeyBase64: string;
     cipherSize: number;
     contextToken?: string;
+    runId?: string;
   }): Promise<{ messageId: string }> {
     const clientId = crypto.randomUUID();
     const response = await this.post("ilink/bot/sendmessage", {
@@ -156,6 +164,7 @@ export class WeixinApiClient {
         from_user_id: "",
         to_user_id: input.toUserId,
         client_id: clientId,
+        run_id: input.runId ?? `codex-${crypto.randomUUID()}`,
         message_type: 2,
         message_state: 2,
         ...(input.contextToken ? { context_token: input.contextToken } : {}),
@@ -183,6 +192,7 @@ export class WeixinApiClient {
     aesKeyBase64: string;
     cipherSize: number;
     contextToken?: string;
+    runId?: string;
   }): Promise<{ messageId: string }> {
     const clientId = crypto.randomUUID();
     const response = await this.post("ilink/bot/sendmessage", {
@@ -190,6 +200,7 @@ export class WeixinApiClient {
         from_user_id: "",
         to_user_id: input.toUserId,
         client_id: clientId,
+        run_id: input.runId ?? `codex-${crypto.randomUUID()}`,
         message_type: 2,
         message_state: 2,
         ...(input.contextToken ? { context_token: input.contextToken } : {}),
@@ -211,13 +222,25 @@ export class WeixinApiClient {
   }
 
   private async post(endpoint: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    // Keep iLink metadata consistent with this installed bridge.
+    body = {
+      ...body,
+      base_info: {
+        ...(body.base_info as Record<string, unknown>),
+        channel_version: CHANNEL_VERSION,
+        bot_agent: `CodexWeixin/${CHANNEL_VERSION}`
+      }
+    };
     const response = await this.fetchImpl(`${this.baseUrl}/${endpoint}`, {
       method: "POST",
-      signal,
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(15000),
       headers: {
         "Content-Type": "application/json",
         AuthorizationType: "ilink_bot_token",
-        Authorization: `Bearer ${this.options.token}`
+        Authorization: `Bearer ${this.options.token.trim()}`,
+        "X-WECHAT-UIN": Buffer.from(String(crypto.randomBytes(4).readUInt32BE(0)), "utf8").toString("base64"),
+        "iLink-App-Id": "bot",
+        "iLink-App-ClientVersion": CLIENT_VERSION
       },
       body: JSON.stringify(body)
     });
@@ -227,16 +250,24 @@ export class WeixinApiClient {
       throw new WeixinApiError(`${endpoint} failed with HTTP ${response.status}: ${text}`, shortEndpoint(endpoint));
     }
 
-    const parsed = text ? JSON.parse(text) as Record<string, unknown> : {};
-    const ret = typeof parsed.ret === "number" ? parsed.ret : 0;
-    const errcode = typeof parsed.errcode === "number" ? parsed.errcode : undefined;
-    if (ret !== 0) {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new WeixinApiError(`${shortEndpoint(endpoint)} returned invalid JSON object`, shortEndpoint(endpoint));
+    }
+    const code = (value: unknown): number | undefined => typeof value === "number" ? value
+      : typeof value === "string" && /^-?\d+$/.test(value) ? Number(value) : undefined;
+    const ret = code(parsed.ret) ?? 0;
+    const errcode = code(parsed.errcode);
+    if (ret !== 0 || (errcode !== undefined && errcode !== 0)) {
       throw new WeixinApiError(
         `${shortEndpoint(endpoint)} failed: ret=${ret} errcode=${errcode ?? "undefined"} errmsg=${String(parsed.errmsg ?? "")}`,
         shortEndpoint(endpoint),
         ret,
         errcode
       );
+    }
+    if (shortEndpoint(endpoint) === "sendmessage") {
+      console.log(`[codex-weixin] sendmessage response ${new Date().toISOString()}: ret=${parsed.ret ?? "absent"} errcode=${errcode ?? "absent"}; serverMessageId=${parsed.message_id !== undefined || parsed.msgid !== undefined}; client delivery unconfirmed`);
     }
     return parsed;
   }

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "jobId": "00000000-0000-4000-8000-000000000001",
+  "dataset": "dataset-name-and-version",
+  "split": "held-out-split-v1",
+  "codeVersion": "recorded-git-or-script-digest",
+  "seed": 1,
+  "evaluationProtocol": "protocol-version",
+  "metrics": {
+    "accuracy": {"value": 0.8, "unit": "fraction", "direction": "max", "definition": "correct predictions / evaluated examples"}
+  }
+}

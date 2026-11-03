@@ -4,6 +4,8 @@ import path from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
+const NPM_PACKAGE_NAME = "@agent-dev-net/weixin-bridge";
+
 const UPDATE_REGISTRY_URLS = {
   official: "https://registry.npmjs.org",
   npmmirror: "https://registry.npmmirror.com"
@@ -13,6 +15,10 @@ const MAX_REGISTRY_RESPONSE_BYTES = 64 * 1024;
 const MAX_INSTALL_OUTPUT_BYTES = 20 * 1024;
 const STABLE_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const CURRENT_PACKAGE_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
+export function isCurrentRuntimeInstallable(): boolean {
+  return resolveNpmInstallTarget(CURRENT_PACKAGE_ROOT) !== undefined;
+}
 
 export type UpdateRegistryId = keyof typeof UPDATE_REGISTRY_URLS;
 
@@ -165,7 +171,7 @@ export class UpdateManager implements UpdateService {
     registry: UpdateRegistryId,
     signal: AbortSignal
   ): Promise<{ latestVersion: string; registry: UpdateRegistryId }> {
-    const response = await this.fetchImpl(`${UPDATE_REGISTRY_URLS[registry]}/codex-weixin/latest`, {
+    const response = await this.fetchImpl(`${UPDATE_REGISTRY_URLS[registry]}/${encodeURIComponent(NPM_PACKAGE_NAME)}/latest`, {
       headers: { Accept: "application/json" },
       signal
     });
@@ -220,7 +226,7 @@ export function buildNpmInstallCommand(
     installPrefix,
     "--no-save",
     "--package-lock=false",
-    `codex-weixin@${safeVersion}`,
+    `${NPM_PACKAGE_NAME}@${safeVersion}`,
     `--registry=${UPDATE_REGISTRY_URLS[safeRegistry]}`,
     "--no-audit",
     "--no-fund"
@@ -292,8 +298,10 @@ export function resolveNpmInstallTarget(
   const pathApi = platform === "win32" ? path.win32 : path.posix;
   if (!pathApi.isAbsolute(packageRoot)) return undefined;
   const normalizedRoot = pathApi.resolve(packageRoot);
-  if (pathApi.basename(normalizedRoot).toLowerCase() !== "codex-weixin") return undefined;
-  const nodeModulesDir = pathApi.dirname(normalizedRoot);
+  const scopeDir = pathApi.dirname(normalizedRoot);
+  if (pathApi.basename(normalizedRoot).toLowerCase() !== "weixin-bridge"
+    || pathApi.basename(scopeDir).toLowerCase() !== "@agent-dev-net") return undefined;
+  const nodeModulesDir = pathApi.dirname(scopeDir);
   if (pathApi.basename(nodeModulesDir).toLowerCase() !== "node_modules") return undefined;
   const packagePrefix = pathApi.dirname(nodeModulesDir);
   const global = platform === "win32" || pathApi.basename(packagePrefix).toLowerCase() === "lib";
@@ -318,7 +326,7 @@ export function releaseRuntimeDirectoryLock(
   const safePrefix = requireInstallPrefix(installPrefix, platform);
   const comparablePrefix = resolveComparablePath(safePrefix, platform, pathApi);
   const packageRoot = resolveComparablePath(
-    options.packageRoot ?? pathApi.join(comparablePrefix, "node_modules", "codex-weixin"),
+    options.packageRoot ?? pathApi.join(comparablePrefix, "node_modules", ...NPM_PACKAGE_NAME.split("/")),
     platform,
     pathApi
   );

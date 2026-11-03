@@ -6,7 +6,8 @@ import {
   type CodexRuntimeInfo
 } from "./app-server-runner.js";
 import { CodexExecRunner, type CodexRunResult } from "./exec-runner.js";
-import type { CodexExecSandbox } from "./sandbox.js";
+import type { CodexApprovalPolicy, CodexExecSandbox } from "./sandbox.js";
+import { applyMemoryUpdates, withMemory } from "../bridge/memory.js";
 
 export type CodexBackend = "auto" | "app-server" | "exec";
 
@@ -14,26 +15,38 @@ export type HybridCodexRunnerOptions = {
   backend: CodexBackend;
   codexBin?: string;
   execSandbox?: CodexExecSandbox;
+  approvalPolicy?: CodexApprovalPolicy;
   timeoutMs?: number;
+  memoryRoot?: string;
 };
 
 export class HybridCodexRunner {
-  private readonly appServer: AppServerCodexRunner;
+  private appServer: AppServerCodexRunner;
   private readonly exec: CodexExecRunner;
+  private readonly isolatedExec: CodexExecRunner;
 
   constructor(private readonly options: HybridCodexRunnerOptions) {
-    this.appServer = new AppServerCodexRunner({
-      codexBin: options.codexBin,
-      requestTimeoutMs: options.timeoutMs
-    });
+    this.appServer = this.createAppServerRunner();
     this.exec = new CodexExecRunner({
       codexBin: options.codexBin,
+      approvalPolicy: options.approvalPolicy,
       sandbox: options.execSandbox,
       timeoutMs: options.timeoutMs
+    });
+    this.isolatedExec = new CodexExecRunner({
+      codexBin: options.codexBin,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      timeoutMs: options.timeoutMs ?? 45_000
     });
   }
 
   async run(input: CodexRunnerInput): Promise<CodexRunResult> {
+    const result = await this.runWithMemory({ ...input, prompt: withMemory(input.prompt, input.cwd, this.options.memoryRoot) });
+    return { ...result, text: applyMemoryUpdates(result.text, input.cwd, this.options.memoryRoot) };
+  }
+
+  private async runWithMemory(input: CodexRunnerInput): Promise<CodexRunResult> {
     const requiresAppServerForStreaming = Boolean(input.onDelta || input.onProgress);
     if (this.options.backend === "exec" && !requiresAppServerForStreaming) {
       return this.exec.run(input);
@@ -44,6 +57,13 @@ export class HybridCodexRunner {
       if (this.options.backend === "app-server") {
         throw error;
       }
+      const failedAppServer = this.appServer;
+      if (!await failedAppServer.closeAndWait()) {
+        throw error;
+      }
+      if (this.appServer === failedAppServer) {
+        this.appServer = this.createAppServerRunner();
+      }
       const fallback = await this.exec.run({
         ...input,
         onDelta: undefined,
@@ -51,15 +71,21 @@ export class HybridCodexRunner {
       });
       return {
         ...fallback,
-        text: `Warning: Codex app-server was unavailable, used codex exec fallback.\n\n${fallback.text}`
+        text: `Warning: Codex app-server was unavailable, used codex exec fallback.\n\n${fallback.text}`,
+        usedExecFallback: true
       };
     }
+  }
+
+  runIsolated(input: Omit<CodexRunnerInput, "threadId">): Promise<CodexRunResult> {
+    return this.isolatedExec.runIsolated(input);
   }
 
   async stop(threadId?: string): Promise<void> {
     await Promise.all([
       this.appServer.stop(threadId),
-      this.exec.stop(threadId)
+      this.exec.stop(threadId),
+      this.isolatedExec.stop(threadId)
     ]);
   }
 
@@ -78,5 +104,15 @@ export class HybridCodexRunner {
   close(): void {
     this.appServer.close();
     this.exec.close();
+    this.isolatedExec.close();
+  }
+
+  private createAppServerRunner(): AppServerCodexRunner {
+    return new AppServerCodexRunner({
+      codexBin: this.options.codexBin,
+      approvalPolicy: this.options.approvalPolicy,
+      sandbox: this.options.execSandbox,
+      requestTimeoutMs: this.options.timeoutMs
+    });
   }
 }

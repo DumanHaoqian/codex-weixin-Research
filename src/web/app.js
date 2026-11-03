@@ -5,6 +5,8 @@ const state = {
   sessions: [],
   config: null,
   codex: null,
+  codexChecking: true,
+  codexDetectionError: "",
   codexRuntime: null,
   codexModels: [],
   loginPoll: null,
@@ -71,11 +73,23 @@ document.addEventListener("DOMContentLoaded", () => {
     removeAccountDialog: document.querySelector("#removeAccountDialog"),
     sessionDialog: document.querySelector("#sessionDialog")
   });
+  const savedTheme = localStorage.getItem("codex-weixin.theme");
+  if (["light", "dark"].includes(savedTheme)) document.documentElement.dataset.theme = savedTheme;
   bindEvents();
   void bootstrap();
 });
 
 function bindEvents() {
+  document.querySelector("#themeToggle").addEventListener("click", () => {
+    const dark = document.documentElement.dataset.theme
+      ? document.documentElement.dataset.theme === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const theme = dark ? "light" : "dark";
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("codex-weixin.theme", theme);
+  });
+  document.querySelector("#sessionBackButton").addEventListener("click", () => {
+    document.querySelector(".session-workbench").classList.remove("is-detail");
+  });
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => closeDialog(button.dataset.closeDialog)));
   document.querySelector("#addAccountButton").addEventListener("click", () => void beginLogin());
@@ -84,6 +98,7 @@ function bindEvents() {
   document.querySelector("#newSessionButton").addEventListener("click", openNewSessionDialog);
   document.querySelector("#settingsForm").addEventListener("submit", (event) => void saveSettings(event));
   document.querySelector("#modelInput").addEventListener("change", () => renderEffortOptions(""));
+  document.querySelector("#automaticSessionModeInput").addEventListener("change", updateAutomaticSessionFields);
   els.sessionModelInput.addEventListener("change", () => void handleSessionModelChange());
   els.sessionEffortInput.addEventListener("change", () => void saveSessionRuntimeSettings());
   els.sessionStreamInput.addEventListener("change", () => void saveSessionRuntimeSettings());
@@ -125,12 +140,41 @@ async function bootstrap() {
     state.codexModels = data.codexModels || [];
     renderAll();
     showView(location.hash.slice(1) || "accounts", false);
+    void loadCodexStatus();
     window.setInterval(() => void refreshData(false), 5000);
     void checkForUpdate();
     window.setInterval(() => void checkForUpdate(), UPDATE_CHECK_INTERVAL_MS);
   } catch (error) {
     toast(error.message, true);
     els.accountsList.innerHTML = emptyState("server-off", "无法连接本机服务", "请重新启动 codex-weixin");
+  }
+}
+
+// 首屏已经可用后再检测 Codex；仅更新状态和模型选项，不重绘用户正在编辑的表单。
+async function loadCodexStatus() {
+  state.codexChecking = true;
+  state.codexDetectionError = "";
+  renderMetrics();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const data = await api("/api/codex-status", { signal: controller.signal });
+    state.codex = data.codex;
+    state.codexRuntime = data.codexRuntime;
+    state.codexModels = data.codexModels || [];
+    const model = document.querySelector("#modelInput").value;
+    const effort = document.querySelector("#effortInput").value;
+    renderModelOptions(model, effort);
+    document.querySelector("#effectiveModelValue").textContent = state.codexRuntime?.model || state.config.model || "Codex 默认";
+    document.querySelector("#effectiveEffortValue").textContent = state.codexRuntime?.effort || state.config.effort || "Codex 默认";
+    renderSessionRuntimeControls(selectedSession());
+  } catch (error) {
+    state.codexDetectionError = error.name === "AbortError" ? "Codex 检测超时，请刷新重试" : "Codex 检测失败，请刷新重试";
+    toast(state.codexDetectionError, true);
+  } finally {
+    clearTimeout(timeout);
+    state.codexChecking = false;
+    renderMetrics();
   }
 }
 
@@ -220,8 +264,9 @@ async function installUpdate() {
       "正在重启服务",
       `已通过${updateRegistryName(result.registry)}完成安装，正在恢复微信连接`
     );
-    await waitForUpdatedService(targetVersion, previousToken);
-    setUpdateProgress("更新完成", "新版本已启动，正在刷新页面");
+    const recovery = await waitForUpdatedService(targetVersion, previousToken);
+    setUpdateProgress(recovery === "login" ? "服务已响应，需要重新登录" : "更新完成",
+      recovery === "login" ? "正在打开登录页面，登录后可查看当前版本" : "新版本已启动，正在刷新页面");
     window.location.reload();
   } catch (error) {
     state.updateInstalling = false;
@@ -235,8 +280,13 @@ async function installUpdate() {
 async function waitForUpdatedService(targetVersion, previousToken) {
   const deadline = Date.now() + UPDATE_RECONNECT_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    // 每轮请求都有独立超时，防止一个挂起的连接阻塞整个重启检测。
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.min(4000, deadline - Date.now()));
     try {
-      const response = await fetch("/api/bootstrap", { cache: "no-store" });
+      const response = await fetch("/api/runtime-status", { cache: "no-store", signal: controller.signal });
+      // 重启会更换登录签名密钥，旧 Cookie 失效时重新打开登录页。
+      if (response.status === 401) return "login";
       const data = await response.json().catch(() => ({}));
       if (
         response.ok
@@ -246,12 +296,15 @@ async function waitForUpdatedService(targetVersion, previousToken) {
       ) {
         state.requestToken = data.requestToken;
         state.version = data.version;
-        return;
+        return "ready";
       }
     } catch {
-      // The service is expected to be briefly unavailable while it restarts.
+      // 重启期间断连、超时都是预期情况，继续下一轮。
+    } finally {
+      clearTimeout(timeout);
     }
-    await delay(900);
+    setUpdateProgress("正在等待新版本启动", "每秒检测服务状态，恢复后将自动刷新页面");
+    await delay(Math.min(900, Math.max(0, deadline - Date.now())));
   }
   throw new Error("新版本已安装，但服务未能自动恢复，请手动重启 codex-weixin");
 }
@@ -340,13 +393,38 @@ function renderMetrics() {
   els.workspaceMetric.title = state.config?.defaultCwd || "";
   const serviceText = document.querySelector("#serviceStateText");
   const serviceDot = document.querySelector("#serviceDot");
-  if (state.codex?.ready) {
+  updateCodexLoadingState();
+  serviceText.setAttribute("aria-live", "polite");
+  serviceText.setAttribute("role", "status");
+  if (state.codexChecking) {
+    serviceText.textContent = "Codex 正在检测中…";
+    serviceDot.classList.remove("is-error");
+  } else if (state.codexDetectionError) {
+    serviceText.textContent = state.codexDetectionError;
+    serviceDot.classList.add("is-error");
+  } else if (state.codex?.ready) {
     serviceText.textContent = state.codex.version || "Codex 已就绪";
     serviceDot.classList.remove("is-error");
   } else {
     serviceText.textContent = "未检测到 Codex CLI";
     serviceDot.classList.add("is-error");
   }
+}
+
+// 检测期间只锁定依赖模型列表的选项，保持其他功能可用；结束后恢复原有禁用条件。
+function updateCodexLoadingState() {
+  const checking = state.codexChecking;
+  document.querySelector("#codexLoadingNotice").hidden = !checking;
+  document.querySelector("#serviceStateText").closest(".service-state").classList.toggle("is-checking", checking);
+  for (const id of ["modelInput", "effortInput"]) {
+    const input = document.getElementById(id);
+    input.disabled = checking;
+    input.title = checking ? "Codex 正在检测中，完成后可切换" : "";
+    input.setAttribute("aria-busy", String(checking));
+  }
+  const disabled = checking || !selectedSession() || state.sendingMessage || state.savingSessionRuntime;
+  els.sessionModelInput.disabled = disabled;
+  els.sessionEffortInput.disabled = disabled;
 }
 
 function renderAccounts() {
@@ -356,7 +434,7 @@ function renderAccounts() {
       .filter(Boolean)
   );
   if (!state.accounts.length) {
-    els.accountsList.innerHTML = emptyState("scan-line", "还没有微信账号", "", `<button class="button button-primary" type="button" data-account-action="add"><i data-lucide="scan-line"></i><span>添加微信</span></button>`);
+    els.accountsList.innerHTML = emptyState("scan-line", "连接第一个微信账号", "扫码连接后，在这里查看运行状态并管理访问权限。", `<button class="button button-primary" type="button" data-account-action="add"><i data-lucide="scan-line"></i><span>添加微信</span></button>`);
     drawIcons();
     return;
   }
@@ -367,7 +445,7 @@ function renderAccounts() {
     return `<article class="account-card">
       <div class="account-main">
         <div class="account-identity">
-          <span class="account-avatar"><i data-lucide="message-circle"></i></span>
+          <span class="account-avatar" aria-hidden="true">${escapeHtml(accountDisplayName(account.accountId).slice(0, 1))}</span>
           <div class="account-name">
             <strong>${escapeHtml(accountDisplayName(account.accountId))}</strong>
             <div class="account-description">个人微信接入</div>
@@ -481,16 +559,31 @@ function renderSettings() {
   document.querySelector("#defaultCwdInput").value = state.config.defaultCwd || "";
   document.querySelector("#allowedWorkspacesInput").value = (state.config.allowedWorkspaces || []).join("\n");
   document.querySelector("#backendInput").value = state.config.codexBackend || "auto";
+  document.querySelector("#approvalPolicyInput").value = state.config.codexApprovalPolicy || "";
   document.querySelector("#sandboxInput").value = state.config.codexExecSandbox || "";
   document.querySelector("#streamRepliesInput").checked = Boolean(state.config.streamReplies);
+  document.querySelectorAll('input[name="automaticSessionMode"]').forEach((input) => {
+    input.checked = input.value === (state.config.automaticSessionMode || "off");
+  });
+  document.querySelector("#automaticSessionContextTokensInput").value = String(state.config.automaticSessionContextTokens || 500000);
+  updateAutomaticSessionFields();
   renderModelOptions();
   document.querySelector("#effectiveModelValue").textContent = state.codexRuntime?.model || state.config.model || "Codex 默认";
   document.querySelector("#effectiveEffortValue").textContent = state.codexRuntime?.effort || state.config.effort || "Codex 默认";
 }
 
-function renderModelOptions() {
+function updateAutomaticSessionFields() {
+  const mode = document.querySelector('input[name="automaticSessionMode"]:checked').value;
+  document.querySelector("#topicSessionHelp").hidden = mode !== "topic";
+  const contextFields = document.querySelector("#contextSessionFields");
+  const contextInput = document.querySelector("#automaticSessionContextTokensInput");
+  contextFields.hidden = mode !== "context-length";
+  contextInput.disabled = mode !== "context-length";
+}
+
+function renderModelOptions(preferredModel = state.config?.model || "", preferredEffort = state.config?.effort || "") {
   const select = document.querySelector("#modelInput");
-  const configuredModel = state.config?.model || "";
+  const configuredModel = preferredModel;
   const effectiveModel = state.codexRuntime?.model || "";
   const models = Array.isArray(state.codexModels) ? state.codexModels : [];
   const options = [{
@@ -508,7 +601,7 @@ function renderModelOptions() {
   }
   select.innerHTML = options.map((option) => `<option value="${escapeAttr(option.value)}"${option.title ? ` title="${escapeAttr(option.title)}"` : ""}>${escapeHtml(option.label)}</option>`).join("");
   select.value = configuredModel;
-  renderEffortOptions(state.config?.effort || "");
+  renderEffortOptions(preferredEffort);
 }
 
 function renderEffortOptions(preferredEffort) {
@@ -652,7 +745,10 @@ async function handleSessionAction(event) {
   const sessionId = button.dataset.sessionId;
   const session = state.sessions.find((item) => item.accountId === accountId && item.id === sessionId);
   if (!session) return;
-  if (action === "open") return selectSession(session);
+  if (action === "open") {
+    document.querySelector(".session-workbench").classList.add("is-detail");
+    return selectSession(session);
+  }
   if (action === "rename") return openRenameSessionDialog(session);
   try {
     button.disabled = true;
@@ -824,8 +920,8 @@ function formatProcessingDuration(startValue, endValue) {
 
 function renderSessionRuntimeControls(session) {
   const disabled = !session || state.sendingMessage || state.savingSessionRuntime;
-  els.sessionModelInput.disabled = disabled;
-  els.sessionEffortInput.disabled = disabled;
+  els.sessionModelInput.disabled = disabled || state.codexChecking;
+  els.sessionEffortInput.disabled = disabled || state.codexChecking;
   els.sessionStreamInput.disabled = disabled;
   const renderKey = session ? [
     sessionKey(session),
@@ -1284,10 +1380,15 @@ async function saveSettings(event) {
         defaultCwd: document.querySelector("#defaultCwdInput").value.trim(),
         allowedWorkspaces: document.querySelector("#allowedWorkspacesInput").value.split("\n").map((line) => line.trim()).filter(Boolean),
         codexBackend: document.querySelector("#backendInput").value,
+        codexApprovalPolicy: document.querySelector("#approvalPolicyInput").value || null,
         codexExecSandbox: document.querySelector("#sandboxInput").value || null,
         model: document.querySelector("#modelInput").value.trim(),
         effort: document.querySelector("#effortInput").value.trim(),
-        streamReplies: document.querySelector("#streamRepliesInput").checked
+        streamReplies: document.querySelector("#streamRepliesInput").checked,
+        automaticSessionMode: document.querySelector('input[name="automaticSessionMode"]:checked').value,
+        automaticSessionContextTokens: Number(document.querySelector("#automaticSessionContextTokensInput").value)
+          || state.config.automaticSessionContextTokens
+          || 500000
       }
     });
     state.config = result.config;
@@ -1308,8 +1409,19 @@ function showView(name, updateHash = true) {
     const visible = panel.dataset.viewPanel === valid;
     panel.hidden = !visible;
     panel.classList.toggle("is-visible", visible);
+    const title = panel.querySelector(".view-title");
+    const tag = visible ? "H1" : "H2";
+    if (title && title.tagName !== tag) {
+      const heading = document.createElement(tag);
+      heading.className = title.className;
+      heading.textContent = title.textContent;
+      title.replaceWith(heading);
+    }
   });
   document.querySelectorAll(".tab[data-view]").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === valid));
+  document.querySelector("#currentViewLabel").textContent = { accounts: "微信账号", sessions: "会话", settings: "设置" }[valid];
+  document.body.dataset.view = valid;
+  document.querySelectorAll(".tab[data-view]").forEach((tab) => tab.setAttribute("aria-current", tab.dataset.view === valid ? "page" : "false"));
   if (updateHash && location.hash !== `#${valid}`) history.replaceState(null, "", `#${valid}`);
 }
 
@@ -1323,6 +1435,7 @@ async function api(url, options = {}) {
   if (options.token !== false && state.requestToken) headers["X-Codex-Weixin-Token"] = state.requestToken;
   const response = await fetch(url, {
     method: options.method || "GET",
+    signal: options.signal,
     headers,
     body: options.body ? (isFormData ? options.body : JSON.stringify(options.body)) : undefined
   });

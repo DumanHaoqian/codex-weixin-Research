@@ -21,3 +21,4 @@ fs.copyFileSync(
   path.join(target, "vendor", "purify.min.js")
 );
 fs.chmodSync(path.join(root, "dist", "server", "index.js"), 0o755);
+fs.cpSync(path.join(root,'remote'),path.join(root,'dist','remote'),{recursive:true,filter:file=>!file.includes('__pycache__')&&!file.endsWith('.pyc')});

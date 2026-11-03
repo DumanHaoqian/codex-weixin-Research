@@ -1,35 +1,63 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import open from "open";
 
+import { defaultConfig, loadConfig } from "../state/config.js";
 import { resolveStatePaths } from "../state/paths.js";
 import { AccountManager } from "./account-manager.js";
 import { parseServerCommand, serverHelpText } from "./arguments.js";
-import { startLocalHttpServer } from "./http-server.js";
+import { runCliUpdate } from "./cli-update.js";
+import { startBackgroundService } from "./daemon.js";
+import { loadEnvironmentFile, parseAllowedHosts } from "./environment.js";
+import { readProductVersion, startLocalHttpServer } from "./http-server.js";
 import { acquireServiceProcessLock } from "./process-lock.js";
 import { launchRestartHelper } from "./restart.js";
+import { startRestartControl, stopService } from "./restart-control.js";
+import { isCurrentRuntimeInstallable, UpdateManager } from "./update-manager.js";
+import { AutomationRuntime } from "../automation/runtime.js";
+import { handleWeixinAutomation } from "../automation/weixin-commands.js";
+import { createGpuTransport } from '../automation/gpu-transport.js';
+import { createResearchTransport } from '../automation/research-transport.js';
+import { ResponsesAnalysisPort } from '../automation/agent.js';
+import { CodexAnalysisPort,DefaultCodexAnalysisPort } from '../automation/codex-analysis.js';
+import { existingComputeMcp } from '../automation/compute-mcp.js';
 
 async function main(): Promise<void> {
+  const launchCwd = process.cwd();
+  loadEnvironmentFile(launchCwd);
+  const launchEnv = { ...process.env };
   const stateDir = process.env.CODEX_WEIXIN_STATE_DIR;
   const port = parsePort(process.env.CODEX_WEIXIN_PORT);
   const paths = resolveStatePaths(stateDir);
+  const configuredWorkspace = loadConfig(paths).defaultCwd;
+  if (configuredWorkspace === defaultConfig().defaultCwd) {
+    fs.mkdirSync(configuredWorkspace, { recursive: true });
+  }
   const processLock = acquireServiceProcessLock(paths.root);
-  const accountManager = new AccountManager({ paths });
+  let automation: AutomationRuntime | undefined;
+  const accountManager = new AccountManager({ paths,
+    onAutomationMessage:(accountId,message)=>handleWeixinAutomation(automation,{accountId,senderId:message.senderId},message)
+  });
   let server: Awaited<ReturnType<typeof startLocalHttpServer>> | undefined;
-  let shuttingDown = false;
+  let restartControl: Awaited<ReturnType<typeof startRestartControl>> | undefined;
+  let shutdownPromise: Promise<void> | undefined;
   let restartScheduled = false;
-  const shutdown = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    try {
-      await accountManager.stopAll();
-      await server?.close();
-    } finally {
-      processLock.release();
-    }
+  const shutdown = (): Promise<void> => {
+    shutdownPromise ??= (async () => {
+      try {
+        await automation?.close();
+        await accountManager.stopAll();
+        await restartControl?.close();
+        await server?.close();
+      } finally {
+        processLock.release();
+      }
+    })();
+    return shutdownPromise;
   };
-  const scheduleRestart = (version: string) => {
+  const scheduleRestart = (version?: string) => {
     if (restartScheduled) return;
     restartScheduled = true;
     const timer = setTimeout(() => {
@@ -38,23 +66,67 @@ async function main(): Promise<void> {
           parentPid: process.pid,
           entryPath: fileURLToPath(import.meta.url),
           stateDir: paths.root,
-          port
+          port: server ? Number(new URL(server.url).port || "80") : port,
+          cwd: launchCwd,
+          env: launchEnv
         });
       } catch (error) {
         restartScheduled = false;
         console.error(`[codex-weixin] unable to restart after update: ${error instanceof Error ? error.message : String(error)}`);
         return;
       }
-      console.log(`[codex-weixin] updated to ${version}; restarting`);
+      console.log(version ? `[codex-weixin] updated to ${version}; restarting` : "[codex-weixin] restarting");
       void shutdown().finally(() => process.exit(0));
     }, 500);
     timer.unref();
   };
   try {
-    server = await startLocalHttpServer({ paths, accountManager, port, onUpdateInstalled: scheduleRestart });
+    if (process.env.CODEX_WEIXIN_AUTOMATION === '1') {
+      const bindHost = process.env.CODEX_WEIXIN_HOST || '127.0.0.1';
+      if (!['127.0.0.1','::1','localhost'].includes(bindHost)
+        && (!process.env.CODEX_WEIXIN_USERNAME || !process.env.CODEX_WEIXIN_PASSWORD)) {
+        throw new Error('Remote automation access requires configured Web authentication');
+      }
+      automation = new AutomationRuntime(paths.root, {
+        research:{
+          analysis:process.env.CODEX_WEIXIN_CODEX_INFERENCE_UPSTREAM?
+            new CodexAnalysisPort(paths.root,loadConfig(paths).codexBin,process.env.CODEX_WEIXIN_CODEX_INFERENCE_UPSTREAM,process.env.CODEX_WEIXIN_ANALYSIS_MODEL):
+            process.env.CODEX_WEIXIN_ANALYSIS_URL&&process.env.CODEX_WEIXIN_ANALYSIS_MODEL?
+            new ResponsesAnalysisPort(process.env.CODEX_WEIXIN_ANALYSIS_URL,process.env.CODEX_WEIXIN_ANALYSIS_MODEL,()=>process.env.CODEX_WEIXIN_ANALYSIS_KEY):
+            new DefaultCodexAnalysisPort(paths.root,loadConfig(paths).codexBin),
+          remote:process.env.CODEX_WEIXIN_RESEARCH_HELPERS?createResearchTransport(paths.root,loadConfig(paths).codexBin,JSON.parse(process.env.CODEX_WEIXIN_RESEARCH_HELPERS),existingComputeMcp(paths.root)):undefined,
+          enableLiterature:process.env.CODEX_WEIXIN_LITERATURE==='1'
+        },
+        gpu:process.env.CODEX_WEIXIN_AUTOMATION_GPU_SERVERS?.trim()?createGpuTransport(paths.root,loadConfig(paths).codexBin,
+          process.env.CODEX_WEIXIN_AUTOMATION_GPU_SERVERS.split(',').map(value=>value.trim()).filter(Boolean),existingComputeMcp(paths.root)):undefined,
+        send:(owner,text)=>accountManager.sendAutomationText(owner,text),
+        authorize: (owner) => {
+          const account = accountManager.listAccounts().find(item=>item.accountId===owner.accountId);
+          return Boolean(account?.enabled && (account.pairedSenderIds.includes(owner.senderId)
+            || loadConfig(paths).allowedSenderIds.includes(owner.senderId)));
+        }
+      });
+      await automation.start();
+    }
+    server = await startLocalHttpServer({
+      paths,
+      accountManager,
+      automation,
+      port,
+      username: process.env.CODEX_WEIXIN_USERNAME,
+      password: process.env.CODEX_WEIXIN_PASSWORD,
+      host: process.env.CODEX_WEIXIN_HOST || "127.0.0.1",
+      allowedHosts: parseAllowedHosts(process.env.CODEX_WEIXIN_ALLOWED_HOSTS),
+      onUpdateInstalled: scheduleRestart
+    });
     await accountManager.startAll();
+    restartControl = await startRestartControl(paths.root, () => scheduleRestart(), () => {
+      void shutdown().finally(() => process.exit(0));
+    }, server.url);
   } catch (error) {
+    await automation?.close();
     await accountManager.stopAll();
+    await restartControl?.close();
     await server?.close();
     processLock.release();
     throw error;
@@ -87,7 +159,36 @@ async function run(): Promise<void> {
     console.log(serverHelpText());
     return;
   }
-  await main();
+  if (command === "foreground") {
+    await main();
+    return;
+  }
+  const launchCwd = process.cwd();
+  loadEnvironmentFile(launchCwd);
+  const launchEnv = { ...process.env };
+  const paths = resolveStatePaths(process.env.CODEX_WEIXIN_STATE_DIR);
+  if (command === "update") {
+    await runCliUpdate({
+      root: paths.root,
+      cwd: launchCwd,
+      env: launchEnv,
+      entryPath: fileURLToPath(import.meta.url),
+      installable: isCurrentRuntimeInstallable(),
+      updater: new UpdateManager({ currentVersion: readProductVersion() })
+    });
+    return;
+  }
+  if (command === "stop" || command === "restart") {
+    await stopService(paths.root);
+    if (command === "stop") {
+      console.log("codex-weixin stopped");
+      return;
+    }
+  }
+  const status = await startBackgroundService({ root: paths.root, entryPath: fileURLToPath(import.meta.url) });
+  console.log(`codex-weixin ${command === "restart" ? "restarted" : "started"} in background (PID ${status.pid}) at ${status.url}`);
+  console.log(`Logs: ${status.logPath}`);
+  return;
 }
 
 run().catch((error) => {

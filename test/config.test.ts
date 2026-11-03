@@ -7,9 +7,9 @@ import test from "node:test";
 import { defaultConfig, loadConfig, MAX_INBOUND_BYTES, saveConfig } from "../src/state/config.js";
 import { resolveStatePaths } from "../src/state/paths.js";
 
-test("uses ~/.codex-weixin as the default Codex workspace", () => {
-  assert.equal(defaultConfig().defaultCwd, path.join(os.homedir(), ".codex-weixin"));
-  assert.deepEqual(defaultConfig().allowedWorkspaces, [path.join(os.homedir(), ".codex-weixin")]);
+test("uses ~/.codex-weixin-bridge as the default Codex workspace", () => {
+  assert.equal(defaultConfig().defaultCwd, path.join(os.homedir(), ".codex-weixin-bridge"));
+  assert.deepEqual(defaultConfig().allowedWorkspaces, [path.join(os.homedir(), ".codex-weixin-bridge")]);
   assert.equal(defaultConfig().streamReplies, true);
   assert.equal(defaultConfig().maxInboundBytes, 100 * 1024 * 1024);
 });
@@ -61,4 +61,16 @@ test("rejects an invalid codex exec sandbox", (t) => {
     () => loadConfig(paths, "/tmp/project"),
     /Invalid codexExecSandbox/
   );
+});
+
+test("round trips approval policy and rejects invalid values", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-policy-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = resolveStatePaths(root);
+  for (const policy of ["never", "on-request", "untrusted", "on-failure"] as const) {
+    saveConfig(paths, { ...defaultConfig(root), codexApprovalPolicy: policy });
+    assert.equal(loadConfig(paths).codexApprovalPolicy, policy);
+  }
+  fs.writeFileSync(paths.configPath, JSON.stringify({ codexApprovalPolicy: "always" }));
+  assert.throws(() => loadConfig(paths), /Invalid codexApprovalPolicy/);
 });

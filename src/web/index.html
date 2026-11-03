@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>codex-weixin</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
@@ -16,20 +16,19 @@
   <header class="app-header">
     <div class="header-inner">
       <a class="brand" href="#accounts" aria-label="codex-weixin 首页">
-        <span class="brand-mark" aria-hidden="true">
-          <i data-lucide="terminal-square"></i>
-          <i data-lucide="message-circle"></i>
-        </span>
+        <img class="brand-logo" src="/logo-96.png" srcset="/logo-192.png 2x" width="96" height="96" alt="">
         <span class="brand-name">codex-weixin</span>
         <span class="brand-version" id="productVersion" aria-label="codex-weixin 版本" hidden></span>
       </a>
       <nav class="view-tabs" aria-label="管理视图">
-        <button class="tab is-active" type="button" data-view="accounts">微信账号</button>
-        <button class="tab" type="button" data-view="sessions">会话</button>
-        <button class="tab" type="button" data-view="settings">设置</button>
+        <a class="tab automation-link" href="/automation.html">定时与科研</a>
+        <button class="tab is-active" type="button" data-view="accounts"><i data-lucide="message-circle"></i><span>微信账号</span></button>
+        <button class="tab" type="button" data-view="sessions"><i data-lucide="messages-square"></i><span>会话</span></button>
+        <button class="tab" type="button" data-view="settings"><i data-lucide="sliders-horizontal"></i><span>设置</span></button>
       </nav>
+      <p class="nav-context">工作台</p>
       <div class="header-actions">
-        <a class="icon-button github-link" href="https://github.com/XavierJiezou/codex-weixin" target="_blank" rel="noopener noreferrer" title="前往 GitHub" aria-label="前往 codex-weixin GitHub 仓库">
+        <a class="icon-button github-link" href="https://github.com/MrGaoGang/codex-weixin-bridge" target="_blank" rel="noopener noreferrer" title="前往 GitHub" aria-label="前往 codex-weixin GitHub 仓库">
           <i data-lucide="github"></i>
         </a>
         <button class="button button-primary header-action" id="addAccountButton" type="button" title="添加微信" aria-label="添加微信">
@@ -37,10 +36,12 @@
           <span>添加微信</span>
         </button>
       </div>
+      <div class="sidebar-footer"><span>微信连接本机 Codex</span><small>你的会话，你的工作区。</small></div>
     </div>
   </header>
 
-  <main>
+  <div class="workspace-bar">
+    <span class="workspace-location">个人工作台 <span class="workspace-bar-slash">/</span> <strong id="currentViewLabel">微信账号</strong></span>
     <section class="status-band" aria-label="服务概览">
       <div class="status-inner">
         <div class="service-state"><span class="pulse-dot" id="serviceDot"></span><span id="serviceStateText">正在检查 Codex</span></div>
@@ -51,25 +52,39 @@
         </dl>
       </div>
     </section>
-
+    <button class="icon-button theme-toggle" id="themeToggle" type="button" aria-label="切换深浅色"><i data-lucide="sun-moon"></i></button>
+  </div>
+  <main>
+    <div id="codexLoadingNotice" class="codex-loading-notice" role="status" aria-live="polite">
+      <span class="codex-loading-spinner" aria-hidden="true"></span>
+      <div><strong>Codex 正在检测中</strong><p>正在获取模型和运行状态，模型与推理强度暂不可切换。账号管理、会话浏览和其他设置可正常使用。</p></div>
+    </div>
     <section class="view is-visible" id="accountsView" data-view-panel="accounts">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">WECHAT ACCOUNTS</p>
-          <h1>微信账号</h1>
+          <h1 class="view-title">微信账号</h1><p class="section-description">管理连接与授权，让微信成为你的 Codex 入口。</p>
         </div>
         <button class="icon-button" id="refreshAccountsButton" type="button" title="刷新账号状态" aria-label="刷新账号状态">
           <i data-lucide="refresh-cw"></i>
         </button>
       </div>
-      <div id="accountsList" class="account-list" aria-live="polite"></div>
+      <div class="accounts-layout">
+        <div id="accountsList" class="account-list" aria-live="polite"></div>
+        <aside class="connection-guide" aria-labelledby="connectionGuideTitle">
+          <h2 id="connectionGuideTitle">连接你的工作流</h2>
+          <p>微信负责发起，Codex 在本机工作区执行。</p>
+          <div class="guide-item"><i data-lucide="scan-line"></i><div><h3>扫码连接微信</h3><p>添加账号后，在微信中完成扫码确认。</p></div></div>
+          <div class="guide-item"><i data-lucide="shield-check"></i><div><h3>允许访问</h3><p>向账号发送消息，再在这里完成授权。</p></div></div>
+          <div class="guide-item"><i data-lucide="messages-square"></i><div><h3>继续 Codex 会话</h3><p>微信与 Web 共用上下文，随时接着聊。</p></div></div>
+          <a class="guide-link" href="#settings">配置工作区与权限 <i data-lucide="arrow-up-right"></i></a>
+        </aside>
+      </div>
     </section>
 
     <section class="view" id="sessionsView" data-view-panel="sessions" hidden>
       <div class="section-heading">
         <div>
-          <p class="eyebrow">CODEX SESSIONS</p>
-          <h1>会话</h1>
+          <h1 class="view-title">会话</h1><p class="section-description">从微信到工作区，继续同一段对话。</p>
         </div>
         <button class="button button-secondary" id="newSessionButton" type="button">
           <i data-lucide="plus"></i>
@@ -89,9 +104,8 @@
           <div id="sessionsList" class="session-list" aria-live="polite"></div>
         </aside>
         <section class="chat-panel" id="sessionChatPanel" aria-label="会话消息">
-          <header class="chat-header" id="chatHeader">
+          <header class="chat-header" id="chatHeader"><button class="icon-button session-back" id="sessionBackButton" type="button" aria-label="返回会话列表"><i data-lucide="arrow-left"></i></button>
             <div>
-              <p class="eyebrow">THREAD HISTORY</p>
               <h2 id="chatTitle">选择一个会话</h2>
               <p class="chat-context" id="chatContext">查看历史消息并继续聊天</p>
             </div>
@@ -142,13 +156,11 @@
     <section class="view settings-view" id="settingsView" data-view-panel="settings" hidden>
       <div class="section-heading">
         <div>
-          <p class="eyebrow">LOCAL CODEX</p>
-          <h1>设置</h1>
+          <h1 class="view-title">设置</h1><p class="section-description">管理工作目录、模型与执行权限。</p>
         </div>
       </div>
       <form id="settingsForm" class="settings-form">
-        <div class="settings-group">
-          <h2>工作区</h2>
+        <div class="settings-group"><div class="settings-intro"><h2>工作区</h2><p>指定 Codex 的默认目录和允许访问的范围。</p></div><div class="settings-fields">
           <label>
             <span>默认工作目录</span>
             <input id="defaultCwdInput" name="defaultCwd" autocomplete="off" required>
@@ -157,9 +169,8 @@
             <span>允许的工作目录</span>
             <textarea id="allowedWorkspacesInput" name="allowedWorkspaces" rows="5" required></textarea>
           </label>
-        </div>
-        <div class="settings-group">
-          <h2>Codex</h2>
+        </div></div>
+        <div class="settings-group"><div class="settings-intro"><h2>Codex</h2><p>统一管理后端、模型、推理强度和执行权限。</p></div><div class="settings-fields">
           <div class="field-grid">
             <label>
               <span>后端</span>
@@ -170,13 +181,24 @@
               </select>
             </label>
             <label>
-              <span>Exec 沙箱</span>
+              <span>沙箱模式（所有后端）</span>
               <select id="sandboxInput" name="codexExecSandbox">
                 <option value="">沿用 Codex 设置</option>
                 <option value="read-only">只读</option>
                 <option value="workspace-write">工作区可写</option>
                 <option value="danger-full-access">完整访问</option>
               </select>
+            </label>
+            <label>
+              <span>审批策略</span>
+              <select id="approvalPolicyInput" name="codexApprovalPolicy">
+                <option value="">沿用默认设置</option>
+                <option value="never">never · 不请求审批</option>
+                <option value="on-request">on-request · 按需审批</option>
+                <option value="untrusted">untrusted · 不可信操作需审批</option>
+                <option value="on-failure">on-failure · 失败时审批（旧版）</option>
+              </select>
+              <small class="field-hint">桥接暂不支持交互审批，收到审批请求时会拒绝执行。</small>
             </label>
             <label>
               <span>模型</span>
@@ -200,9 +222,29 @@
               </span>
             </label>
           </div>
-        </div>
-        <div class="settings-group">
-          <h2>版本</h2>
+        </div></div>
+        <div class="settings-group"><div class="settings-intro"><h2>会话管理</h2><p>控制微信消息何时建议开启新的受管会话。</p></div><div class="settings-fields">
+          <fieldset class="session-mode-fieldset">
+            <legend>自动管理会话</legend>
+            <div class="session-mode-options" id="automaticSessionModeInput">
+              <label><input type="radio" name="automaticSessionMode" value="off" checked><span>关闭（默认）</span></label>
+              <label><input type="radio" name="automaticSessionMode" value="topic"><span>按话题切分</span></label>
+              <label><input type="radio" name="automaticSessionMode" value="context-length"><span>按上下文长度切分</span></label>
+            </div>
+            <small class="field-hint">关闭时不按话题或上下文长度自动切分；/new 仍可手动创建。两种自动模式都会先询问你，确认后才切换。Codex app-server 回退到 exec 时保留现有的新会话处理规则。</small>
+          </fieldset>
+          <div class="automatic-session-detail" id="topicSessionHelp" hidden>
+            <small class="field-hint">按话题切分：仅使用文字，图片、视频、文件、音频及其附件描述不参与判断。当前会话累计含文字的用户消息不足 5 条（包含本次消息，纯附件消息不计数）时跳过额外模型调用；达到 5 条后，仅对疑似换题的消息，额外调用当前会话使用的 Codex 模型判断，会增加模型用量和等待时间。判断可能有误，bridge 会先询问，确认后才切换。</small>
+          </div>
+          <div class="automatic-session-detail" id="contextSessionFields" hidden>
+            <label>
+              <span>上下文切分阈值（tokens）</span>
+              <input id="automaticSessionContextTokensInput" name="automaticSessionContextTokens" type="number" min="1" max="10000000" step="1" inputmode="numeric" required>
+            </label>
+            <small class="field-hint">默认按 GPT-6.1 Sol 在 Codex 中的 500,000 tokens 填写。bridge 根据可读取的文本记录估算，图片、视频、文件、音频及其附件描述不参与计算，隐藏工具上下文也不计入；达到阈值后会先询问你。取消后，同一会话和阈值不会重复提醒；新建会话或修改阈值后恢复提醒。</small>
+          </div>
+        </div></div>
+        <div class="settings-group"><div class="settings-intro"><h2>版本</h2><p>检查本机服务版本，按需更新。</p></div><div class="settings-fields">
           <div class="settings-update">
             <span class="settings-update-version">
               <small>当前版本</small>
@@ -213,7 +255,7 @@
               <span>检查更新</span>
             </button>
           </div>
-        </div>
+        </div></div>
         <div class="form-actions">
           <button class="button button-primary" type="submit">
             <i data-lucide="save"></i>
@@ -227,7 +269,6 @@
   <dialog class="modal update-modal" id="updateDialog" aria-labelledby="updateDialogTitle">
     <div class="modal-header update-modal-header">
       <div>
-        <p class="eyebrow">PRODUCT UPDATE</p>
         <h2 id="updateDialogTitle">发现新版本</h2>
       </div>
       <span class="update-modal-icon" aria-hidden="true"><i data-lucide="package"></i></span>
@@ -256,7 +297,6 @@
   <dialog class="modal qr-modal" id="qrDialog">
     <div class="modal-header">
       <div>
-        <p class="eyebrow">WECHAT LOGIN</p>
         <h2>微信扫码登录</h2>
       </div>
       <button class="icon-button" type="button" data-close-dialog="qrDialog" title="关闭" aria-label="关闭扫码窗口">
@@ -281,7 +321,6 @@
     <form id="accountForm" method="dialog">
       <div class="modal-header">
         <div>
-          <p class="eyebrow">ACCOUNT REMARK</p>
           <h2>修改微信账号备注</h2>
         </div>
         <button class="icon-button" type="button" data-close-dialog="accountDialog" title="关闭" aria-label="关闭账号备注窗口">
@@ -310,7 +349,6 @@
     <form id="removeAccountForm" method="dialog">
       <div class="modal-header">
         <div>
-          <p class="eyebrow">REMOVE ACCOUNT</p>
           <h2 id="removeAccountDialogTitle">移除微信账号</h2>
         </div>
         <button class="icon-button" type="button" data-close-dialog="removeAccountDialog" title="关闭" aria-label="关闭移除账号窗口">
@@ -352,7 +390,6 @@
     <form id="sessionForm" method="dialog">
       <div class="modal-header">
         <div>
-          <p class="eyebrow">MANAGED SESSION</p>
           <h2 id="sessionDialogTitle">新建会话</h2>
         </div>
         <button class="icon-button" type="button" data-close-dialog="sessionDialog" title="关闭" aria-label="关闭会话窗口">

@@ -4,7 +4,7 @@ import path from "node:path";
 import { normalizeAccountId } from "../weixin/accounts.js";
 
 export function defaultStateDir(): string {
-  return path.join(os.homedir(), ".codex-weixin");
+  return path.join(os.homedir(), ".codex-weixin-bridge");
 }
 
 export type StatePaths = {
@@ -19,6 +19,12 @@ export type StatePaths = {
 };
 
 export function resolveStatePaths(root = defaultStateDir()): StatePaths {
+  // .env values and quoted shell assignments do not receive shell tilde expansion.
+  if (root === "~") root = os.homedir();
+  else if (root.startsWith("~/") || (process.platform === "win32" && root.startsWith("~\\"))) {
+    root = path.join(os.homedir(), root.slice(2));
+  }
+  root = path.resolve(root);
   return {
     root,
     accountsDir: path.join(root, "accounts"),

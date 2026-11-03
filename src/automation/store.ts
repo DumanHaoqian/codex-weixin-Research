@@ -1,0 +1,227 @@
+import { Worker } from 'node:worker_threads';
+import { automationCapabilities } from './capabilities.js';
+
+export type SqlValue = string | number | null;
+export type Statement = { sql: string; params?: SqlValue[] };
+export type Row = Record<string, SqlValue>;
+
+// A single synchronous SQLite connection runs outside the HTTP/WeChat event loop.
+// The SQL interface is internal: never pass client SQL or identifiers to this port.
+const workerSource = String.raw`
+const { parentPort, workerData } = require('node:worker_threads');
+const { DatabaseSync } = require('node:sqlite');
+const fs = require('node:fs');
+const path = require('node:path');
+let db;
+try {
+  if (workerData.file !== ':memory:') fs.mkdirSync(path.dirname(workerData.file), {recursive:true});
+  db = new DatabaseSync(workerData.file);
+  db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
+  const version = db.prepare('PRAGMA user_version').get().user_version;
+  if (version > 4) throw new Error('Unsupported automation schema version: ' + version);
+  db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
+  if (version > 0 && version < 4 && workerData.file !== ':memory:') {
+    const backupDir = path.join(path.dirname(workerData.file), 'backups');
+    fs.mkdirSync(backupDir, {recursive:true});
+    const backup = path.join(backupDir, 'pre-v4-from-v' + version + '-' + require('node:crypto').randomUUID() + '.sqlite');
+    // VACUUM INTO takes a consistent SQLite snapshot, including committed WAL.
+    // Never copy an open .sqlite file while silently omitting its WAL sidecar.
+    db.prepare('VACUUM INTO ?').run(backup);
+  }
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(workerData.schema);
+    if (!db.prepare('PRAGMA table_info(notification_attempts)').all().some(c => c.name === 'part_id'))
+      db.exec('ALTER TABLE notification_attempts ADD COLUMN part_id TEXT REFERENCES notification_parts(id)');
+    db.exec('PRAGMA user_version=4; COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  parentPort.postMessage({ready:true});
+} catch (e) { try { db?.close(); } catch {} parentPort.postMessage({fatal:String(e.message)}); parentPort.close(); }
+parentPort.on('message', ({id, kind, statements}) => {
+  try {
+    if (kind === 'close') { db.close(); parentPort.postMessage({id,result:[]}); parentPort.close(); return; }
+    let result;
+    if (kind === 'all') result = db.prepare(statements[0].sql).all(...(statements[0].params || []));
+    else {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        result = statements.map(s => {
+          const r = db.prepare(s.sql).run(...(s.params || []));
+          return {changes:Number(r.changes)};
+        });
+        db.exec('COMMIT');
+      } catch(e) { db.exec('ROLLBACK'); throw e; }
+    }
+    parentPort.postMessage({id,result});
+  } catch(e) { parentPort.postMessage({id,error:String(e.message)}); }
+});
+`;
+
+const schema = `
+CREATE TABLE IF NOT EXISTS tasks (
+ id TEXT PRIMARY KEY, account_id TEXT NOT NULL, sender_id TEXT NOT NULL,
+ revision INTEGER NOT NULL, state TEXT NOT NULL, definition TEXT NOT NULL,
+ next_due INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS tasks_due ON tasks(state,next_due);
+CREATE TABLE IF NOT EXISTS revisions (
+ task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
+ definition TEXT NOT NULL, PRIMARY KEY(task_id,revision)
+) STRICT;
+CREATE TABLE IF NOT EXISTS requests (
+ account_id TEXT NOT NULL, sender_id TEXT NOT NULL, request_key TEXT NOT NULL,
+ payload_hash TEXT NOT NULL, response TEXT NOT NULL,
+ PRIMARY KEY(account_id,sender_id,request_key)
+) STRICT;
+CREATE TABLE IF NOT EXISTS occurrences (
+ id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
+ due_at INTEGER NOT NULL, source_key TEXT NOT NULL, state TEXT NOT NULL,
+ UNIQUE(task_id,revision,source_key)
+) STRICT;
+CREATE TABLE IF NOT EXISTS runs (
+ id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), occurrence_id TEXT NOT NULL REFERENCES occurrences(id),
+ revision INTEGER NOT NULL, state TEXT NOT NULL, snapshot TEXT NOT NULL,
+ start_deadline INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, result TEXT
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS active_task_run ON runs(task_id) WHERE state IN ('queued','running');
+CREATE TABLE IF NOT EXISTS operations (
+ id TEXT PRIMARY KEY, effect_key TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(id),
+ state TEXT NOT NULL, payload TEXT NOT NULL, result TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS resource_claims (
+ id TEXT PRIMARY KEY, server_id TEXT NOT NULL, gpu_uuid TEXT NOT NULL,
+ holder_id TEXT NOT NULL, state TEXT NOT NULL, epoch INTEGER NOT NULL
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS active_gpu_claim ON resource_claims(server_id,gpu_uuid)
+ WHERE state IN ('requesting','held','handing_off','job_owned','unknown');
+CREATE TABLE IF NOT EXISTS events (
+ id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), semantic_key TEXT NOT NULL UNIQUE,
+ kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS notifications (
+ id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES events(id),
+ account_id TEXT NOT NULL, sender_id TEXT NOT NULL, state TEXT NOT NULL,
+ content TEXT NOT NULL, updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS notification_attempts (
+ id TEXT PRIMARY KEY, notification_id TEXT NOT NULL REFERENCES notifications(id),
+ state TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, error TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS notification_parts (
+ id TEXT PRIMARY KEY, notification_id TEXT NOT NULL REFERENCES notifications(id),
+ part_index INTEGER NOT NULL, content TEXT NOT NULL, state TEXT NOT NULL,
+ attempt_id TEXT, UNIQUE(notification_id,part_index)
+) STRICT;
+CREATE TABLE IF NOT EXISTS gpu_watches (
+ task_id TEXT PRIMARY KEY REFERENCES tasks(id), revision INTEGER NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id),
+ state TEXT NOT NULL, next_check INTEGER NOT NULL, deadline INTEGER NOT NULL,
+ last_signature TEXT, stable_signature TEXT, stable_count INTEGER NOT NULL DEFAULT 0,
+ last_observation_id TEXT, updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS gpu_watches_due ON gpu_watches(state,next_check);
+CREATE TABLE IF NOT EXISTS gpu_observations (
+ id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), run_id TEXT NOT NULL REFERENCES runs(id),
+ server_alias TEXT NOT NULL, binding_hash TEXT NOT NULL, observed_at INTEGER NOT NULL,
+ valid_until INTEGER NOT NULL, validity TEXT NOT NULL, payload TEXT NOT NULL,
+ previous_valid_id TEXT REFERENCES gpu_observations(id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS gpu_observations_task ON gpu_observations(task_id,observed_at);
+CREATE TABLE IF NOT EXISTS research_workflows (
+ id TEXT PRIMARY KEY REFERENCES runs(id),task_id TEXT NOT NULL REFERENCES tasks(id),phase TEXT NOT NULL,
+ state TEXT NOT NULL,next_check INTEGER NOT NULL,deadline INTEGER NOT NULL,submissions INTEGER NOT NULL,
+ data TEXT NOT NULL,updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS research_workflows_due ON research_workflows(state,next_check);
+CREATE UNIQUE INDEX IF NOT EXISTS active_task_workflow ON research_workflows(task_id) WHERE state IN ('waiting','submitting','reserving','held','handoff','monitoring','unknown');
+CREATE TABLE IF NOT EXISTS research_objects (
+ id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),workflow_id TEXT NOT NULL REFERENCES research_workflows(id),
+ operation_id TEXT NOT NULL,server_id TEXT NOT NULL,remote_id TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,
+ receipt TEXT NOT NULL,metrics TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS research_artifacts (
+ id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),run_id TEXT NOT NULL REFERENCES runs(id),
+ name TEXT NOT NULL,media_type TEXT NOT NULL,sha256 TEXT NOT NULL,size INTEGER NOT NULL,relative_path TEXT NOT NULL,created_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS literature_cursors (
+ task_id TEXT NOT NULL REFERENCES tasks(id),revision INTEGER NOT NULL,source TEXT NOT NULL,window_start INTEGER NOT NULL,
+ window_end INTEGER NOT NULL,cursor TEXT,complete INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(task_id,revision,source)
+) STRICT;
+CREATE TABLE IF NOT EXISTS literature_items (
+ id TEXT PRIMARY KEY,identity TEXT NOT NULL UNIQUE,version TEXT NOT NULL,metadata TEXT NOT NULL,updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS literature_matches (
+ task_id TEXT NOT NULL REFERENCES tasks(id),item_id TEXT NOT NULL REFERENCES literature_items(id),version TEXT NOT NULL,
+ run_id TEXT NOT NULL REFERENCES runs(id),event_id TEXT REFERENCES events(id),discovered_at INTEGER NOT NULL,
+ PRIMARY KEY(task_id,item_id,version)
+) STRICT;
+CREATE TABLE IF NOT EXISTS literature_versions (
+ item_id TEXT NOT NULL REFERENCES literature_items(id),version TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(item_id,version)
+) STRICT;
+`;
+
+export class AutomationStore {
+  private worker: Worker;
+  private serial = 0;
+  private pending = new Map<number, { resolve(value: Row[]): void; reject(error: Error): void }>();
+  private ready: Promise<void>;
+  private failure?: Error;
+  private closing?: Promise<void>;
+
+  constructor(file: string) {
+    const capability = automationCapabilities().storage;
+    if (!capability.ready) throw new Error(capability.reason);
+    this.worker = new Worker(workerSource, { eval: true, workerData: { file, schema } });
+    this.ready = new Promise((resolve, reject) => {
+      this.worker.on('message', (message) => {
+        if (message.ready) { resolve(); return; }
+        if (message.fatal) { this.fail(new Error(message.fatal)); reject(this.failure); return; }
+        const request = this.pending.get(message.id);
+        if (!request) return;
+        this.pending.delete(message.id);
+        if (message.error) request.reject(new Error(message.error)); else request.resolve(message.result);
+      });
+      this.worker.on('error', (error) => { this.fail(error); reject(error); });
+      this.worker.on('exit', () => {
+        const error = new Error('Automation database worker exited');
+        this.fail(error); reject(error);
+      });
+    });
+    // Opening may fail before the first consumer awaits a query.
+    void this.ready.catch(() => {});
+  }
+
+  all(sql: string, params: SqlValue[] = []): Promise<Row[]> {
+    return this.request('all', [{ sql, params }]);
+  }
+
+  transaction(statements: Statement[]): Promise<Row[]> {
+    if (!statements.length) return Promise.resolve([]);
+    return this.request('transaction', statements);
+  }
+
+  close(): Promise<void> {
+    this.closing ??= (async () => {
+      try { await this.request('close', []); }
+      finally { await this.worker.terminate(); }
+    })();
+    return this.closing;
+  }
+
+  private async request(kind: string, statements: Statement[]): Promise<Row[]> {
+    await this.ready;
+    if (this.failure) throw this.failure;
+    if (this.closing && kind !== 'close') throw new Error('Automation database is closing');
+    const id = ++this.serial;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.worker.postMessage({ id, kind, statements });
+    });
+  }
+
+  private fail(error: Error): void {
+    this.failure ??= error;
+    for (const request of this.pending.values()) request.reject(this.failure);
+    this.pending.clear();
+  }
+}

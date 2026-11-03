@@ -9,12 +9,14 @@ import { promisify } from "node:util";
 import { z } from "zod";
 
 import { resolveCodexCommand } from "../codex/exec-runner.js";
-import { loadConfig, saveConfig } from "../state/config.js";
+import { isAutomaticSessionMode, loadConfig, normalizeAutomaticSessionContextTokens, saveConfig } from "../state/config.js";
 import type { StatePaths } from "../state/paths.js";
 import type { CodexModelOption, CodexRuntimeInfo } from "../codex/app-server-runner.js";
 import type { AccountManager, SessionAttachmentFile, SessionHistoryMessage, SessionUpload } from "./account-manager.js";
 import { LoginManager } from "./login-manager.js";
 import { UpdateManager, type UpdateService } from "./update-manager.js";
+import type { AutomationRuntime } from "../automation/runtime.js";
+import { automationRoute } from "./automation-routes.js";
 
 const bodySchema = z.record(z.string(), z.unknown());
 const accountDisplayNameSchema = z.object({
@@ -33,10 +35,13 @@ const configSchema = z.object({
   defaultCwd: z.string().min(1),
   allowedWorkspaces: z.array(z.string().min(1)).min(1),
   codexBackend: z.enum(["auto", "app-server", "exec"]),
+  codexApprovalPolicy: z.enum(["never", "on-request", "untrusted", "on-failure"]).nullable().optional(),
   codexExecSandbox: z.enum(["read-only", "workspace-write", "danger-full-access"]).nullable().optional(),
   model: z.string().optional(),
   effort: z.string().optional(),
-  streamReplies: z.boolean().optional()
+  streamReplies: z.boolean().optional(),
+  automaticSessionMode: z.enum(["off", "topic", "context-length"]).optional(),
+  automaticSessionContextTokens: z.number().int().min(1).max(10_000_000).optional()
 });
 const MAX_WEB_UPLOAD_FILES = 10;
 const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
@@ -45,11 +50,16 @@ const webRoot = fileURLToPath(new URL("../web", import.meta.url));
 const execFileAsync = promisify(execFile);
 
 export type LocalHttpServerOptions = {
+  automation?: AutomationRuntime;
   paths: StatePaths;
   accountManager: AccountManager;
   loginManager?: LoginManager;
   productVersion?: string;
   port?: number;
+  host?: string;
+  allowedHosts?: string[];
+  username?: string;
+  password?: string;
   codexCheck?: () => Promise<{ ready: boolean; version?: string; error?: string }>;
   codexRuntimeCheck?: () => Promise<CodexRuntimeInfo>;
   codexModelsCheck?: () => Promise<CodexModelOption[]>;
@@ -64,6 +74,16 @@ export type LocalHttpServer = {
 };
 
 export async function startLocalHttpServer(options: LocalHttpServerOptions): Promise<LocalHttpServer> {
+  const { username, password } = options;
+  let authDigest: Buffer | undefined;
+  if (username !== undefined || password !== undefined) {
+    if (!username || !password || /[:\x00-\x1f\x7f]/.test(username) || /[\x00-\x1f\x7f]/.test(password)) {
+      throw new Error("CODEX_WEIXIN_USERNAME and CODEX_WEIXIN_PASSWORD must both be non-empty; control characters and colons in the username are not allowed");
+    }
+    authDigest = crypto.createHash("sha256").update(`${username}:${password}`, "utf8").digest();
+  }
+  const host = options.host ?? "127.0.0.1";
+  const authSessionKey = crypto.randomBytes(32);
   const requestToken = crypto.randomBytes(24).toString("base64url");
   const productVersion = options.productVersion ?? readProductVersion();
   const loginManager = options.loginManager ?? new LoginManager({
@@ -78,6 +98,8 @@ export async function startLocalHttpServer(options: LocalHttpServerOptions): Pro
       loginManager,
       productVersion,
       requestToken,
+      authDigest,
+      authSessionKey,
       updateService,
       port: actualPort
     }).catch((error: unknown) => {
@@ -88,21 +110,24 @@ export async function startLocalHttpServer(options: LocalHttpServerOptions): Pro
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(options.port ?? 8787, "127.0.0.1", () => resolve());
+    server.listen(options.port ?? 8787, host, () => resolve());
   });
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("Unable to determine local server address");
   }
   actualPort = address.port;
+  const urlHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   return {
-    url: `http://127.0.0.1:${actualPort}`,
+    url: `http://${urlHost.includes(":") ? `[${urlHost}]` : urlHost}:${actualPort}`,
     requestToken,
     close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   };
 }
 
 type HandlerContext = LocalHttpServerOptions & {
+  authDigest?: Buffer;
+  authSessionKey: Buffer;
   loginManager: LoginManager;
   productVersion: string;
   requestToken: string;
@@ -112,15 +137,51 @@ type HandlerContext = LocalHttpServerOptions & {
 
 async function handleRequest(request: IncomingMessage, response: ServerResponse, context: HandlerContext): Promise<void> {
   setSecurityHeaders(response);
-  if (!isAllowedHost(request.headers.host, context.port)) {
-    sendJson(response, 403, { error: "Local host required" });
+  if (!isAllowedHost(request.headers.host, context)) {
+    sendJson(response, 403, { error: "Allowed host required" });
     return;
   }
   const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
   const method = request.method ?? "GET";
+  if (context.authDigest) {
+    if (method === "GET" && ["/login.css", "/login.js", "/favicon.svg", "/logo.png", "/logo-96.png", "/logo-192.png"].includes(url.pathname)) {
+      serveStatic(response, url.pathname);
+      return;
+    }
+    if (method === "POST" && url.pathname === "/api/auth/login") {
+      if (!request.headers.origin || !isAllowedOrigin(request.headers.origin, request.headers.host, context)) {
+        sendJson(response, 403, { error: "Same origin required" });
+        return;
+      }
+      const input = z.object({ username: z.string().max(1024), password: z.string().max(4096) }).parse(await readJsonBody(request));
+      const digest = crypto.createHash("sha256").update(`${input.username}:${input.password}`, "utf8").digest();
+      if (!crypto.timingSafeEqual(digest, context.authDigest)) {
+        sendJson(response, 401, { error: "用户名或密码不正确" });
+        return;
+      }
+      const payload = `${Date.now()}.${crypto.randomBytes(24).toString("base64url")}`;
+      const signature = crypto.createHmac("sha256", context.authSessionKey).update(payload).digest("base64url");
+      response.setHeader("Set-Cookie", `codex_weixin_session=${payload}.${signature}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+    const match = /^Basic ([A-Za-z0-9+/]+={0,2})$/i.exec(request.headers.authorization ?? "");
+    const suppliedDigest = match
+      ? crypto.createHash("sha256").update(Buffer.from(match[1], "base64")).digest()
+      : undefined;
+    const basicAuthenticated = suppliedDigest && crypto.timingSafeEqual(suppliedDigest, context.authDigest);
+    if (!basicAuthenticated && !hasValidAuthSession(request, context.authSessionKey)) {
+      if (method === "GET" && ["/", "/index.html", "/automation.html"].includes(url.pathname)) {
+        serveStatic(response, "/login.html");
+      } else {
+        sendJson(response, 401, { error: "Authentication required" });
+      }
+      return;
+    }
+  }
   if (isMutation(method)) {
-    if (!isAllowedOrigin(request.headers.origin, context.port)) {
-      sendJson(response, 403, { error: "Local origin required" });
+    if (!isAllowedOrigin(request.headers.origin, request.headers.host, context)) {
+      sendJson(response, 403, { error: "Same origin required" });
       return;
     }
     if (request.headers["x-codex-weixin-token"] !== context.requestToken) {
@@ -129,30 +190,50 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     }
   }
 
+  if (url.pathname.startsWith('/api/automation/')) {
+    const body = ['POST','PATCH'].includes(method) ? await readJsonBody(request) : undefined;
+    const key = request.headers['idempotency-key'];
+    const reply = await automationRoute(method,url,body,typeof key === 'string' ? key : undefined,context.automation);
+    sendJson(response,reply.status,reply.body);
+    return;
+  }
+
+  // 重启检测只返回当前版本和进程令牌，不等待 Codex 模型发现或账号初始化。
+  // 仍沿用其他 API 的 Host 和登录校验，避免暴露未授权的进程令牌。
+  if (method === "GET" && url.pathname === "/api/runtime-status") {
+    sendJson(response, 200, { version: context.productVersion, requestToken: context.requestToken });
+    return;
+  }
   if (method === "GET" && url.pathname === "/api/bootstrap") {
+    const config = loadConfig(context.paths);
+    sendJson(response, 200, {
+      product: "codex-weixin",
+      version: context.productVersion,
+      requestToken: context.requestToken,
+      config,
+      codex: null,
+      codexRuntime: null,
+      codexModels: [],
+      accounts: context.accountManager.listAccounts(),
+      sessions: context.accountManager.listSessions()
+    });
+    return;
+  }
+  // Codex 检测与首屏数据分开，CLI 或模型发现耗时不会阻塞账号、会话和设置。
+  if (method === "GET" && url.pathname === "/api/codex-status") {
     const config = loadConfig(context.paths);
     const [codex, codexRuntime, codexModels] = await Promise.all([
       (context.codexCheck ?? (() => checkCodex(config.codexBin)))(),
       readCodexRuntime(context),
       readCodexModels(context)
     ]);
-    sendJson(response, 200, {
-      product: "codex-weixin",
-      version: context.productVersion,
-      requestToken: context.requestToken,
-      config,
-      codex,
-      codexRuntime,
-      codexModels,
-      accounts: context.accountManager.listAccounts(),
-      sessions: context.accountManager.listSessions()
-    });
+    sendJson(response, 200, { codex, codexRuntime, codexModels });
     return;
   }
   if (method === "GET" && url.pathname === "/api/update") {
     const force = url.searchParams.get("force") === "1";
     if (force && (
-      !isAllowedOrigin(request.headers.origin, context.port)
+      !isAllowedOrigin(request.headers.origin, request.headers.host, context)
       || request.headers["x-codex-weixin-token"] !== context.requestToken
     )) {
       sendJson(response, 403, { error: "Invalid manual update check" });
@@ -362,6 +443,14 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       defaultCwd,
       allowedWorkspaces,
       codexExecSandbox: input.codexExecSandbox ?? undefined,
+      codexApprovalPolicy: input.codexApprovalPolicy === undefined ? current.codexApprovalPolicy : input.codexApprovalPolicy ?? undefined,
+      automaticSessionMode: isAutomaticSessionMode(input.automaticSessionMode)
+        ? input.automaticSessionMode
+        : current.automaticSessionMode,
+      automaticSessionContextTokens: normalizeAutomaticSessionContextTokens(
+        input.automaticSessionContextTokens,
+        current.automaticSessionContextTokens
+      ),
       model: optionalString(input.model),
       effort: optionalString(input.effort)
     });
@@ -381,7 +470,19 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   sendJson(response, 404, { error: "Not found" });
 }
 
-function readProductVersion(): string {
+function hasValidAuthSession(request: IncomingMessage, key: Buffer): boolean {
+  const cookie = /(?:^|;\s*)codex_weixin_session=([^;]+)/.exec(request.headers.cookie ?? "")?.[1];
+  if (!cookie) return false;
+  const parts = cookie.split(".");
+  if (parts.length !== 3) return false;
+  const issuedAt = Number(parts[0]);
+  if (!Number.isFinite(issuedAt) || issuedAt > Date.now() || Date.now() - issuedAt > 43_200_000) return false;
+  const expected = crypto.createHmac("sha256", key).update(`${parts[0]}.${parts[1]}`).digest("base64url");
+  const signature = Buffer.from(parts[2]);
+  return signature.length === expected.length && crypto.timingSafeEqual(signature, Buffer.from(expected));
+}
+
+export function readProductVersion(): string {
   try {
     const packageJson = JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version?: unknown };
     return typeof packageJson.version === "string" ? packageJson.version : "unknown";
@@ -400,10 +501,20 @@ function readCodexModels(context: HandlerContext): Promise<CodexModelOption[]> {
 
 function serveStatic(response: ServerResponse, pathname: string): void {
   const files: Record<string, { name: string; type: string }> = {
+    "/login.html": { name: "login.html", type: "text/html; charset=utf-8" },
+    "/login.css": { name: "login.css", type: "text/css; charset=utf-8" },
+    "/login.js": { name: "login.js", type: "text/javascript; charset=utf-8" },
     "/": { name: "index.html", type: "text/html; charset=utf-8" },
     "/index.html": { name: "index.html", type: "text/html; charset=utf-8" },
+    "/automation.html": { name: "automation.html", type: "text/html; charset=utf-8" },
+    "/automation.js": { name: "automation.js", type: "text/javascript; charset=utf-8" },
+    "/research-ui.js": { name: "research-ui.js", type: "text/javascript; charset=utf-8" },
+    "/automation.css": { name: "automation.css", type: "text/css; charset=utf-8" },
     "/favicon.ico": { name: "favicon.svg", type: "image/svg+xml" },
     "/favicon.svg": { name: "favicon.svg", type: "image/svg+xml" },
+    "/logo.png": { name: "logo.png", type: "image/png" },
+    "/logo-96.png": { name: "logo-96.png", type: "image/png" },
+    "/logo-192.png": { name: "logo-192.png", type: "image/png" },
     "/styles.css": { name: "styles.css", type: "text/css; charset=utf-8" },
     "/app.js": { name: "app.js", type: "text/javascript; charset=utf-8" },
     "/vendor/lucide.min.js": { name: "vendor/lucide.min.js", type: "text/javascript; charset=utf-8" },
@@ -433,12 +544,54 @@ function setSecurityHeaders(response: ServerResponse): void {
   response.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'");
 }
 
-function isAllowedHost(host: string | undefined, port: number): boolean {
-  return host === `127.0.0.1:${port}` || host === `localhost:${port}`;
+function isAllowedHost(host: string | undefined, context: HandlerContext): boolean {
+  const configuredNames = context.allowedHosts ?? [];
+  const names = ["127.0.0.1", "localhost", ...configuredNames];
+  const bindHost = context.host ?? "127.0.0.1";
+  if (bindHost !== "0.0.0.0" && bindHost !== "::") names.push(bindHost);
+  if (!host) return false;
+  return names.some((name) => {
+    try {
+      const value = name.trim();
+      const bareIpv6 = !value.includes("://") && !value.startsWith("[") && value.split(":").length > 2;
+      const authority = value.includes("://") ? value : `http://${bareIpv6 ? `[${value}]` : value}`;
+      const url = new URL(authority);
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) return false;
+      const portSuffix = !bareIpv6 && value.match(/:(\d+)$/u)?.[1];
+      const explicitPort = value.includes("://")
+        ? url.port || (url.protocol === "https:" ? "443" : "80")
+        : portSuffix || String(context.port);
+      // Explicit allowlist names also cover HTTP/HTTPS reverse proxies. Keep
+      // implicit local/bind hosts and explicitly configured URLs/ports scoped.
+      const proxyDefaults = configuredNames.includes(name) && !value.includes("://") && !portSuffix;
+      const ports = proxyDefaults ? [String(context.port), "80", "443"] : [explicitPort];
+      const hostname = url.hostname.toLowerCase();
+      return ports.some((port) => host.toLowerCase() === `${hostname}:${port}`
+        || (["80", "443"].includes(port) && host.toLowerCase() === hostname));
+    } catch {
+      return false;
+    }
+  });
 }
 
-function isAllowedOrigin(origin: string | undefined, port: number): boolean {
-  return !origin || origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
+function isAllowedOrigin(origin: string | undefined, host: string | undefined, context: HandlerContext): boolean {
+  if (!origin) return true;
+  if (!host) return false;
+  try {
+    const source = new URL(origin);
+    if (!["http:", "https:"].includes(source.protocol) || source.username || source.password
+      || source.pathname !== "/" || source.search || source.hash) return false;
+    // URL origins normalize hostname case and the protocol's default port.
+    if (source.origin === new URL(`${source.protocol}//${host}`).origin) return true;
+    // Preserve localhost/127.0.0.1 compatibility for local HTTP clients.
+    const target = new URL(`http://${host}`);
+    const localNames = ["localhost", "127.0.0.1"];
+    return source.protocol === "http:" && localNames.includes(target.hostname)
+      && localNames.includes(source.hostname) && (target.port || "80") === String(context.port)
+      && (source.port || "80") === (target.port || "80");
+  } catch {
+    return false;
+  }
 }
 
 function isMutation(method: string): boolean {
