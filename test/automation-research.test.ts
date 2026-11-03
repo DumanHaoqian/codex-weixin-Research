@@ -253,3 +253,15 @@ test('waiting workflows share one GPU observation and log anomaly notifications 
     assert.equal(f.remote.objects.get(id).state,'running');
   }finally{await f.close();}
 });
+
+test('deleting a held workflow verifies pure-holder cleanup and releases only its internal claims',async()=>{
+  const f=fixture();try{
+    const input=workflow('reserve_then_handoff');input.workflow!.resource.handoff='manual';
+    const {task,run}=await f.register(input);await f.step(0);await f.step(15000);await f.step(20000);
+    assert.equal(f.remote.reserves,1);await f.runtime.tasks.setState(owner,task.id,'delete','delete-held');await f.step(25000);
+    const row=(await f.runtime.store.all('SELECT * FROM research_workflows WHERE id=?',[run.id]))[0];
+    assert.equal(row.state,'cancelled');assert.equal(JSON.parse(String(row.data)).cleanupVerified,true);
+    assert.equal((await f.runtime.store.all('SELECT state FROM resource_claims'))[0].state,'released');assert.equal(f.remote.handoffs,0);
+    assert.equal((await f.runtime.store.all("SELECT count(*) n FROM notifications WHERE state='pending'"))[0].n,0);
+  }finally{await f.close();}
+});

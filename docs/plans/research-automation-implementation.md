@@ -2,17 +2,17 @@
 
 Baseline: requirements v0.2 and SD-SCHED-001. Branch: codex/research-automation.
 
-This ledger records implementation evidence; an implemented slice is not completion of a milestone.
+This ledger records implementation evidence; an implemented slice is not completion of a milestone. The dated paragraphs below retain historical evidence. The current five-feature delivery and acceptance boundaries are in [full-feature-completion.md](full-feature-completion.md).
 
 | Stage | Status | Evidence / remaining work |
 | --- | --- | --- |
 | Design baseline | committed | Approved requirements and system design preserved in Git |
-| M0 capability/storage foundation | in progress | Worker SQLite, transactional schema and fail-closed capability report; authorized MCP transport, restricted agent profile and remote expiry still require implementation/verification |
-| M1 general scheduling | in progress | Reminder vertical slice includes Web/WeChat management, request replay for all management mutations, keyset history pagination, multipart delivery and manual runs. General agent execution/profile verification, richer intent handling, backlog evidence and real phone validation remain incomplete |
-| M2 research observation | in progress | Durable read-only GPU watches, shared bounded samples, UUID/process/memory-aware eligibility, change/failure/expiry events, restart recovery and Web/WeChat management implemented. Actual authorized background MCP/server checks and job attach/training monitoring remain incomplete |
-| M3 execution/resources | pending | Recipe grants, remote protocol, both GPU modes, TTL and handoff |
-| M4 research results/literature | pending | Validation/comparison and provider cursors |
-| M5 E2E/release | pending | All 42 acceptance cases and controlled integration evidence |
+| M0 capability/storage foundation | implemented | v4 migration/consistent backups; native text-only analysis and authorized background MCP verified; independent remote lease expiry implemented/tested |
+| M1 general scheduling | implemented | Durable queue, owner/revision/deadline checks, cancellation, stateless Agent reports, Web/WeChat commands, pagination and durable delivery; unrestricted natural-language scheduling and phone receipt are not claimed |
+| M2 research observation | implemented | GPU watch and workflow observations share samples; helper-owned job attach, bounded logs, explicit stall/OOM/NaN alerts, restart/revocation checks; live g8a6000 observation verified |
+| M3 execution/resources | implemented, live GPU positive pending | Recipe grants, tmux supervisors, identities, operation reconciliation, both resource modes, bounded physical holder, TTL/release/handoff; controlled real CPU workflows passed; busy GPUs prevented a permitted physical allocation test |
+| M4 research results/literature | implemented | Job-bound metric/artifact validation, compatible-only comparison, immutable reports, incremental Crossref/arXiv, version/discovery/delivery separation; real comparison and public-source requests passed |
+| M5 E2E/release | development acceptance recorded | 58 automation tests pass; native protocol, Linux helper, real CPU jobs, inference/public sources and browser fixture exercised. Release/phone receipt/full physical GPU matrix remain distinct from source completion |
 
 No production runtime is updated by these source commits. Real server/GPU tests require an identified test target and bounded recipe/resource grant. No credentials or private memories belong in this branch.
 
@@ -22,7 +22,7 @@ Runtime/API slice: typecheck and production build passed; 40 selected tests pass
 
 Baseline comparison: an independent worktree at 50114c5 passed 237/242 tests; implementation at 8c4e3be passed 248/253 with the same five failures, using --test-concurrency=1. Failures concern macOS CLI PATH, overlapping Windows shutdown, default workspace startup, Homebrew npm lookup and source-mode update installation. Parallel runs also intermittently hit restart-fixture cleanup EPERM: the detached entry writes its result before Windows releases its working directory. The fixture now uses bounded asynchronous cleanup retries. Do not report the full suite as passing.
 
-Additional hardening revalidates project bindings at execution and rejects remote automation startup without Web authentication. The current chat exposes no polyu4090 tools, so no real background MCP/server/GPU validation has been performed; M0 remains incomplete.
+Additional hardening revalidates project bindings at execution and rejects remote automation startup without Web authentication. The current chat exposes no compute-server-management tools, so no real background MCP/server/GPU validation has been performed; M0 remains incomplete.
 
 Latest targeted validation: all 42 selected tests passed, including 13 automation tests and existing HTTP/account/restart coverage, after the bounded Windows fixture cleanup correction. Typecheck and build passed. This count is a test count, not completion of the 42 product acceptance scenarios.
 

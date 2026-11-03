@@ -48,15 +48,14 @@ export class WorkflowEngine{
   private async collect():Promise<void>{
     const observations=new Map<string,RemoteReceipt>();
     const rows=await this.store.all(`SELECT w.*,t.account_id,t.sender_id,t.state AS task_state,r.snapshot FROM research_workflows w JOIN tasks t ON t.id=w.task_id JOIN runs r ON r.id=w.id
-      WHERE w.state IN ('waiting','submitting','reserving','held','handoff','monitoring','unknown','releasing') AND w.next_check<=? ORDER BY w.next_check,w.id LIMIT 20`,[this.now()]);
+      WHERE (w.state IN ('waiting','submitting','reserving','held','handoff','monitoring','unknown','releasing') OR (w.state IN ('blocked','cancelled') AND COALESCE(json_extract(w.data,'$.cleanupVerified'),0)=0)) AND w.next_check<=? ORDER BY w.next_check,w.id LIMIT 20`,[this.now()]);
     for(const candidate of rows){if(this.stopped)return;await this.exclusive(String(candidate.id),async()=>{
       const row=(await this.store.all(`SELECT w.*,t.account_id,t.sender_id,t.state AS task_state,r.snapshot FROM research_workflows w JOIN tasks t ON t.id=w.task_id JOIN runs r ON r.id=w.id WHERE w.id=?`,[candidate.id]))[0];
-      if(!row||!['waiting','submitting','reserving','held','handoff','monitoring','unknown','releasing'].includes(String(row.state)))return;
+      if(!row||!['waiting','submitting','reserving','held','handoff','monitoring','unknown','releasing','blocked','cancelled'].includes(String(row.state)))return;
       const w=decode(row);
-      if(!await this.authorize(w.owner)||row.task_state==='deleted'){
-        // Cleanup only a pure holder; the helper refuses to release handed-off jobs.
-        if(w.data.leaseId){try{await this.invoke(remoteRequest('release',w.data.target,w.owner,{objectId:w.data.leaseId}));}catch{}}
-        await this.save(w,row.task_state==='deleted'?'cancelled':'blocked','当前所有者不可用或任务已删除；未提交新实验，运行中的实验未被停止。');return;
+      if(!await this.authorize(w.owner)||row.task_state==='deleted'||['blocked','cancelled'].includes(w.state)){
+        await this.cleanup(w);
+        await this.save(w,row.task_state==='deleted'?'cancelled':'blocked','当前所有者不可用或任务已删除；未提交新实验，运行中的实验未被停止。',this.now()+30000,false);return;
       }
       try{await this.step(w,observations);}catch(error){
         // Do not invent failure of a live job from a lost observation.
@@ -64,11 +63,41 @@ export class WorkflowEngine{
       }
     });}
   }
-  private async save(w:Workflow,state:string,notice?:string,next=this.now()+((w.data.spec.monitorSeconds??15)*1000)){
+  private async cleanup(w:Workflow){
+    // Revocation/deletion never kills a real job. Retain a bounded janitor until
+    // the original object proves release; local TTL alone cannot free claims.
+    try{
+      const operation=w.data.operation as RemoteRequest|undefined;
+      if(!w.data.leaseId&&!w.data.jobId&&operation?.payload.objectId){
+        if(operation.action==='reserve')w.data.leaseId=operation.payload.objectId;
+        if(operation.action==='submit')w.data.jobId=operation.payload.objectId;
+      }
+      const objectId=w.data.jobId??w.data.leaseId;
+      if(!objectId){
+        const effects=await this.store.all('SELECT id FROM operations WHERE task_id=? AND effect_key LIKE ?',[w.taskId,`${w.id}:%`]);
+        const claims=await this.store.all("SELECT id FROM resource_claims WHERE holder_id=? AND state!='released'",[w.id]);
+        if(effects.length&&claims.length){w.data.cleanupObservation='operation_identity_requires_review';return;}
+        // Claims acquired before a persisted dispatch intent cannot have caused
+        // a remote effect; release that local-only crash window safely.
+        if(!effects.length)await this.releaseClaims(w);w.data.cleanupVerified=true;return;
+      }
+      let receipt:RemoteReceipt;
+      if(w.data.leaseId&&!w.data.jobId&&!w.data.cleanupOperation){
+        const request=remoteRequest('release',w.data.target,w.owner,{objectId:w.data.leaseId});w.data.cleanupOperation=request;
+        await this.save(w,w.state,undefined,this.now()+30000);receipt=await this.invoke(request);
+      }else receipt=await this.invoke(remoteRequest('inspect',w.data.target,w.owner,{objectId}));
+      await this.object(w,receipt,w.data.jobId?'job':'lease');
+      if(receipt.payload.handoffJobId){w.data.jobId=receipt.payload.handoffJobId;w.phase='monitor';return;}
+      if(receipt.payload.releaseVerified===true&&['released','expired','exited','failed','needs_review'].includes(receipt.state)){
+        await this.releaseClaims(w);w.data.cleanupVerified=true;
+      }
+    }catch{w.data.cleanupObservation='unavailable';}
+  }
+  private async save(w:Workflow,state:string,notice?:string,next=this.now()+((w.data.spec.monitorSeconds??15)*1000),notify=true){
     const changed=w.state!==state||notice&&w.data.lastNotice!==notice;w.state=state;
     const statements:Statement[]=[{sql:'UPDATE research_workflows SET phase=?,state=?,next_check=?,submissions=?,data=?,updated_at=? WHERE id=?',params:[w.phase,state,next,w.submissions,JSON.stringify({...w.data,...(notice?{lastNotice:notice}:{})}),this.now(),w.id]}];
     if(changed&&notice){const event=crypto.randomUUID();statements.push({sql:'INSERT INTO events VALUES (?,?,?,?,?,?)',params:[event,w.taskId,`workflow:${w.id}:${event}`,state,JSON.stringify({run:w.id,content:notice}),this.now()]});
-      if(w.definition.notification!=='muted')statements.push({sql:'INSERT INTO notifications VALUES (?,?,?,?,?,?,?)',params:[crypto.randomUUID(),event,w.owner.accountId,w.owner.senderId,'pending',`${w.definition.title}\n${notice}\n流程：${w.id}`,this.now()]});}
+      if(notify&&w.definition.notification!=='muted')statements.push({sql:'INSERT INTO notifications VALUES (?,?,?,?,?,?,?)',params:[crypto.randomUUID(),event,w.owner.accountId,w.owner.senderId,'pending',`${w.definition.title}\n${notice}\n流程：${w.id}`,this.now()]});}
     await this.store.transaction(statements);if(notice)w.data.lastNotice=notice;
   }
   private async effect(w:Workflow,action:RemoteAction,payload:Record<string,unknown>,effectKey:string){
@@ -205,7 +234,7 @@ export class WorkflowEngine{
         if(bound)await this.store.transaction([{sql:'UPDATE research_objects SET metrics=? WHERE id=?',params:[JSON.stringify(parsed.data),receipt.objectId!]}]);
         const evidence=await this.artifacts.write(w.taskId,w.id,'result.json',{state,receipt,metrics:parsed.success?parsed.data:null},this.now());
         if(receipt.payload.releaseVerified===true)await this.releaseClaims(w);
-        if(state==='failed'&&w.definition.kind==='research_workflow'&&Number(w.data.attempt)<=spec.retryCount&&w.submissions<spec.grant.maxSubmissions){
+        if(state==='failed'&&receipt.payload.releaseVerified===true&&w.definition.kind==='research_workflow'&&Number(w.data.attempt)<=spec.retryCount&&w.submissions<spec.grant.maxSubmissions){
           w.data.attempt++;for(const key of ['operation','jobId','leaseId','handoffJobId','handoffRequested'])delete w.data[key];w.phase='resources';await this.save(w,'waiting','实验已知失败；按保存方案与次数限制进行下一次尝试。',this.now()+15000);return;
         }
         await this.save(w,state,`实验进程已退出，验证状态：${state}。证据产物：${evidence.id}；缺失指标不会被报告为科研成功。`);return;
@@ -236,7 +265,8 @@ export class WorkflowEngine{
       w.data.lastProcessState=receipt.state;await this.save(w,'monitoring',notice);return;
     }
   }
-  private async releaseClaims(w:Workflow){await this.store.transaction([{sql:"UPDATE resource_claims SET state='released' WHERE holder_id=?",params:[w.id]}]);}
+  private async releaseClaims(w:Workflow){await this.store.transaction([{sql:`UPDATE resource_claims SET state='released' WHERE holder_id=? OR holder_id IN (
+    SELECT other.id FROM research_workflows other JOIN tasks t ON t.id=other.task_id WHERE ? IS NOT NULL AND json_extract(other.data,'$.jobId')=? AND t.account_id=? AND t.sender_id=?)`,params:[w.id,w.data.jobId??null,w.data.jobId??null,w.owner.accountId,w.owner.senderId]}]);}
   async control(owner:Owner,id:string,action:'handoff'|'release'|'stop'|'stop_monitor'|'resume_monitor',key:string){
     return this.exclusive(id,()=>this.applyControl(owner,id,action,key));
   }

@@ -8,6 +8,8 @@
 
 本文定义拟实现架构、数据一致性、执行协议、故障恢复、接口边界和交付步骤。文中新增类、表、API、远端 helper 均为设计，不代表当前源码已具备。本文没有启动定时任务、连接服务器或占用 GPU。
 
+2026-11-04 实现补充：原设计稿保留如下；当前实现状态以 [交付记录](../plans/full-feature-completion.md) 为准。模型适配器使用独立原生 app-server + 文本推理防火墙：验证只读/禁止审批、关闭继承工具，HTTP 请求层移除全部工具并在整个返回流校验后才交回执行器。另一种显式配置的 Responses API 端口同样没有工具执行器，不自动回退。远端 `research_helper.py` 是 SHA256 固定的显式安装组件，状态/锁位于远端本地盘，项目资料可在 NAS；物理保留用 CUDA driver，无 PyTorch 依赖。schema v4、不可变证据、外部操作意图和工作流分别持久化，科研列表沿用所有者绑定的分页协议。
+
 ## 1. 设计结论与约束
 
 采用**模块化单体 + 本地 SQLite + 持久化状态机 + 远端受控执行 helper**：
@@ -286,7 +288,7 @@ scheduleStatus、workflowStatus、jobState、validationState、notificationState
 
 ### 8.1 MCP 适配边界
 
-RemoteGateway 暴露以下应用接口；它们是本项目新增端口，不冒充 polyu4090 已有同名工具：
+RemoteGateway 暴露以下应用接口；它们是本项目新增端口，不冒充 compute-server-management 已有同名工具：
 
 ```ts
 interface RemoteGateway {

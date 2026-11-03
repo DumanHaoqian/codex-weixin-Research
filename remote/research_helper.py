@@ -484,9 +484,14 @@ class Helper:
                         time.sleep(0.25)
                     if not is_lease:
                         manifest['exitCode'] = child.wait()
-                        manifest['releaseVerified'] = not group_alive(saved)
-                        manifest['state'] = 'exited' if manifest['releaseVerified'] else 'needs_review'
-                        if not manifest['releaseVerified']:
+                        group_finished = not group_alive(saved)
+                        gpu_finished = True
+                        if gpus:
+                            observed = {g['uuid']: g for g in self.collector()}
+                            gpu_finished = all(gpu in observed and not observed[gpu]['pids'] for gpu in gpus)
+                        manifest['releaseVerified'] = group_finished and gpu_finished
+                        manifest['state'] = 'exited' if group_finished else 'needs_review'
+                        if not group_finished:
                             manifest['errorCode'] = 'process_group_still_alive'
                     elif manifest["state"] not in TERMINAL:
                         verified = not same_process(saved) and not any(child.pid in g["pids"] for g in self.collector())
