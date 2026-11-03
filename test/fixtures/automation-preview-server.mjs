@@ -13,7 +13,12 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'automation-ui-'));
 const paths=resolveStatePaths(root);saveConfig(paths,defaultConfig(root));
 saveAccount(paths,{accountId:'demo-research',token:'fixture-only',baseUrl:'https://example.invalid',cdnBaseUrl:'https://example.invalid',savedAt:new Date().toISOString(),enabled:true});
 const state=new RuntimeStateStore(accountStatePaths(paths,'demo-research'));state.setPairedSenderIds(['demo-user']);
-const automation=new AutomationRuntime(root,{authorize:o=>o.accountId==='demo-research'&&o.senderId==='demo-user',send:async()=>({state:'api_accepted'})});
+const bindingHash='b'.repeat(64);
+const automation=new AutomationRuntime(root,{authorize:o=>o.accountId==='demo-research'&&o.senderId==='demo-user',send:async()=>({state:'api_accepted'}),gpu:{
+  async targets(){return [{server:'demo-gpu',host:'fixture.invalid',port:22,user:'demo',bindingHash}];},
+  async sample(){return {server:'demo-gpu',bindingHash,startedAt:Date.now(),observedAt:Date.now(),devices:[{uuid:'GPU-fixture',index:0,name:'Simulated research GPU',totalBytes:24*1024**3,usedBytes:0,utilization:0,temperature:40,processes:[]}]};},
+  async close(){}
+}});
 await automation.start();
 const manager=new AccountManager({paths});
 const server=await startLocalHttpServer({paths,accountManager:manager,automation,port:0});

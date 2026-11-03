@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { nextAfter, scheduleSchema } from './calendar.js';
 import { AutomationStore, type Row, type Statement } from './store.js';
 import { historyPage, type HistoryKind, type PageInput } from './history.js';
+import { gpuWatchSchema, type GpuWatch } from './gpu.js';
 
 export const ownerSchema = z.object({ accountId: z.string().min(1).max(200), senderId: z.string().min(1).max(200) }).strict();
 export type Owner = z.infer<typeof ownerSchema>;
@@ -12,8 +13,12 @@ export const taskSchema = z.object({
   kind: z.enum(['reminder','agent_report','research_workflow','job_monitor','gpu_watch','literature_watch']),
   projectId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).nullable().default(null),
   schedule: scheduleSchema,
-  notification: z.enum(['always','findings_or_failure','muted']).default('always')
-}).strict();
+  notification: z.enum(['always','findings_or_failure','muted']).default('always'),
+  gpuWatch: gpuWatchSchema.optional()
+}).strict().superRefine((def,context)=>{
+  if(def.kind==='gpu_watch'&&!def.gpuWatch)context.addIssue({code:'custom',path:['gpuWatch'],message:'GPU watch configuration required'});
+  if(def.kind!=='gpu_watch'&&def.gpuWatch)context.addIssue({code:'custom',path:['gpuWatch'],message:'Only GPU watches accept GPU configuration'});
+});
 export type TaskInput = z.input<typeof taskSchema>;
 export type TaskDefinition = z.infer<typeof taskSchema>;
 export type Task = { id: string; owner: Owner; revision: number; state: string; definition: TaskDefinition; nextDue: number | null };
@@ -22,6 +27,7 @@ export type TaskServiceOptions = {
   now?: () => number;
   authorize: (owner: Owner) => boolean | Promise<boolean>;
   validateActivation?: (definition: TaskDefinition) => void | Promise<void>;
+  validateGpuWatch?: (watch: GpuWatch) => void | Promise<void>;
 };
 
 function decode(row: Row): Task {
@@ -48,12 +54,24 @@ export class TaskService {
 
   private async activation(def: TaskDefinition, now: number): Promise<number> {
     // Until validated adapters exist, do not activate a research task as a reminder.
-    if (def.kind !== 'reminder') throw new Error('Capability unavailable: research/agent adapter not yet verified; save as draft');
+    await this.validateKind(def);
     if (def.projectId && !this.options.validateActivation) throw new Error('Project binding cannot be verified');
     await this.options.validateActivation?.(def);
     const next = nextAfter(def.schedule, now);
     if (next === null) throw new Error('Scheduled time is in the past');
     return next;
+  }
+
+  private async validateKind(def:TaskDefinition):Promise<void>{
+    if(def.kind==='gpu_watch'&&this.options.validateGpuWatch)await this.options.validateGpuWatch(def.gpuWatch!);
+    else if(def.kind!=='reminder')throw new Error('Capability unavailable: research/agent adapter not yet verified; save as draft');
+  }
+
+  private async monitorCapacity(task:Task):Promise<boolean>{
+    if(task.definition.kind!=='gpu_watch')return true;
+    const count=(await this.store.all(`SELECT count(*) AS n FROM gpu_watches w JOIN tasks t ON t.id=w.task_id
+      WHERE t.account_id=? AND w.state='watching'`,[task.owner.accountId]))[0];
+    return Number(count.n)<20;
   }
 
   async list(owner: Owner): Promise<Task[]> {
@@ -150,6 +168,7 @@ export class TaskService {
       const next = state === 'active' ? task.state === 'active' ? task.nextDue : await this.activation(task.definition,now) : null;
       const statements: Statement[] = [{ sql: 'UPDATE tasks SET state=?,next_due=?,updated_at=? WHERE id=?', params: [state,next,now,id] }];
       if (state === 'deleted') statements.push({ sql: "UPDATE notifications SET state='cancelled',updated_at=? WHERE event_id IN (SELECT id FROM events WHERE task_id=?) AND state IN ('pending','failed')", params: [now,id] });
+      if (state === 'deleted') statements.push({sql:"UPDATE gpu_watches SET state='stopped',updated_at=? WHERE task_id=? AND state='watching'",params:[now,id]});
       const updated:Task = {...task,state,nextDue:next};
       await this.store.transaction([...statements,...replay.record(updated)]);
       return updated;
@@ -164,10 +183,18 @@ export class TaskService {
         const task = decode(row);
         const allowed = await this.options.authorize(task.owner);
         let bindingValid = true;
-        try { await this.options.validateActivation?.(task.definition); }
+        try {
+          await this.options.validateActivation?.(task.definition);
+          // Registration has no remote effect. The observation worker refreshes
+          // and validates the saved target before every remote sample; do not
+          // make the reminder scheduler wait for GPU/network discovery.
+          if(task.definition.kind!=='reminder'&&!(task.definition.kind==='gpu_watch'&&this.options.validateGpuWatch))throw new Error('Unsupported task adapter');
+        }
         catch { bindingValid = false; }
         const scheduled = task.nextDue!;
-        const state = !allowed || !bindingValid ? 'blocked' : now - scheduled > 300_000 ? 'missed' : task.definition.kind !== 'reminder' ? 'blocked' : 'succeeded';
+        const watching=(await this.store.all("SELECT task_id FROM gpu_watches WHERE task_id=? AND state='watching'",[task.id])).length>0;
+        const capacity=await this.monitorCapacity(task);
+        const state = !allowed || !bindingValid ? 'blocked' : now - scheduled > 300_000 ? 'missed' : watching?'skipped':!capacity?'blocked':'succeeded';
         await this.recordRun(task,scheduled,String(scheduled),now,state,allowed,true);
       }
     });
@@ -181,7 +208,9 @@ export class TaskService {
     const existing=(await this.store.all('SELECT * FROM requests WHERE account_id=? AND sender_id=? AND request_key=?',[owner.accountId,owner.senderId,key]))[0];
     if(existing){if(existing.payload_hash!==hash)throw new Error('Idempotency conflict');return JSON.parse(String(existing.response));}
     if(task.state==='deleted')throw new Error('Task is deleted');
-    if(task.definition.kind!=='reminder')throw new Error('Capability unavailable: agent/research adapter is not verified');
+    await this.validateKind(task.definition);
+    if((await this.store.all("SELECT task_id FROM gpu_watches WHERE task_id=? AND state='watching'",[id])).length)throw new Error('Active GPU monitor conflict: stop monitoring before starting another');
+    if(!await this.monitorCapacity(task))throw new Error('Active GPU monitor limit exceeded');
     await this.options.validateActivation?.(task.definition);
     const now=this.now(),run=crypto.randomUUID();
     const result={id:run,state:'succeeded'};
@@ -191,18 +220,40 @@ export class TaskService {
     return result;
   });}
 
+  stopMonitor(owner:Owner,id:string,requestKey:string):Promise<{state:string}>{return this.serialize(async()=>{
+    await this.authorized(owner);
+    const replay=await this.replay<{state:string}>(owner,requestKey,{action:'stop-monitor',id});
+    if(replay.response)return replay.response;
+    await this.get(owner,id);
+    const watch=(await this.store.all('SELECT state FROM gpu_watches WHERE task_id=?',[id]))[0];
+    if(!watch)throw new Error('GPU monitor not found');
+    const result={state:watch.state==='watching'?'stopped':String(watch.state)};
+    await this.store.transaction([
+      {sql:'UPDATE gpu_watches SET state=?,updated_at=? WHERE task_id=?',params:[result.state,this.now(),id]},
+      ...replay.record(result)
+    ]);
+    return result;
+  });}
+
   private async recordRun(task:Task,scheduled:number,source:string,now:number,state:string,notify:boolean,advance:boolean,
     run=crypto.randomUUID(),extra:Statement[]=[]):Promise<void>{
     const occurrence=crypto.randomUUID(),event=crypto.randomUUID();
     const statements:Statement[]=[
       {sql:'INSERT INTO occurrences VALUES (?,?,?,?,?,?)',params:[occurrence,task.id,task.revision,scheduled,source,state]},
-      {sql:'INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)',params:[run,task.id,occurrence,task.revision,state,JSON.stringify(task.definition),scheduled+300_000,now,now,JSON.stringify({text:task.definition.prompt,scheduledAt:scheduled,observedAt:now})]}
+      {sql:'INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)',params:[run,task.id,occurrence,task.revision,state,JSON.stringify(task.definition),scheduled+300_000,now,now,JSON.stringify({text:task.definition.kind==='gpu_watch'?(state==='succeeded'?'已启动 GPU 只读监控；读数与监控状态见观测记录。':`GPU 监控未启动：${state}`):task.definition.prompt,scheduledAt:scheduled,observedAt:now})]}
     ];
+    if(state==='succeeded'&&task.definition.kind==='gpu_watch'){
+      const watch=task.definition.gpuWatch!;
+      statements.push({sql:`INSERT INTO gpu_watches VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET
+        revision=excluded.revision,run_id=excluded.run_id,state=excluded.state,next_check=excluded.next_check,
+        deadline=excluded.deadline,last_signature=NULL,stable_signature=NULL,stable_count=0,last_observation_id=NULL,updated_at=excluded.updated_at`,
+        params:[task.id,task.revision,run,'watching',now,now+watch.durationSeconds*1000,null,null,0,null,now]});
+    }
     if(advance){
       const next=nextAfter(task.definition.schedule,now);
       statements.push({sql:'UPDATE tasks SET next_due=?,state=?,updated_at=? WHERE id=?',params:[next,next===null?'completed':'active',now,task.id]});
     }
-    if(notify&&task.definition.notification!=='muted'){
+    if(notify&&task.definition.notification!=='muted'&&!(task.definition.kind==='gpu_watch'&&state==='succeeded')){
       const content=state==='succeeded'?task.definition.prompt:`Task ${task.id}: ${state}`;
       statements.push(
         {sql:'INSERT INTO events VALUES (?,?,?,?,?,?)',params:[event,task.id,`${task.id}:${task.revision}:${source}`,state,JSON.stringify({run,content}),now]},

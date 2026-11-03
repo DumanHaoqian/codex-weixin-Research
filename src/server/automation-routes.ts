@@ -18,6 +18,17 @@ export async function automationRoute(method:string,url:URL,body:unknown,key:str
     const page = () => z.object({limit:z.coerce.number().int().min(1).max(100).optional(),cursor:z.string().max(1500).optional()}).parse({
       limit:url.searchParams.get('limit')??undefined,cursor:url.searchParams.get('cursor')??undefined
     });
+    if(method==='GET'&&route.startsWith('/gpu/')){
+      await runtime.tasks.authorized(owner);
+      if(route==='/gpu/targets')return runtime.gpu?{status:200,body:{targets:await runtime.gpu.port.targets()}}:{status:503,body:{error:'GPU observation MCP transport unavailable'}};
+      if(route==='/gpu/observations')return {status:200,body:await runtime.tasks.page(owner,'gpu_observations',page())};
+      if(route==='/gpu/watches'){
+        const items=await runtime.store.all(`SELECT w.*,o.validity,o.observed_at,o.valid_until,o.payload
+          FROM gpu_watches w JOIN tasks t ON t.id=w.task_id LEFT JOIN gpu_observations o ON o.id=w.last_observation_id
+          WHERE t.account_id=? AND t.sender_id=? ORDER BY w.updated_at DESC LIMIT 100`,[owner.accountId,owner.senderId]);
+        return {status:200,body:{items,now:Date.now()}};
+      }
+    }
     if(method==='POST'&&(route==='/resolve-time'||route==='/preview')){
       await runtime.tasks.authorized(owner);
       if(route==='/resolve-time'){
@@ -48,7 +59,7 @@ export async function automationRoute(method:string,url:URL,body:unknown,key:str
       await runtime.delivery.retry(owner,resend[1],options,key);runtime.wake(owner);
       return {status:202,body:{queued:true}};
     }
-    const match=/^\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume|run))?$/.exec(route);
+    const match=/^\/tasks\/([a-f0-9-]{36})(?:\/(pause|resume|run|stop-monitor))?$/.exec(route);
     if (match) {
       if (method==='GET'&&!match[2]) return {status:200,body:{task:await runtime.tasks.get(owner,match[1])}};
       if (method==='PATCH'&&!match[2]) {
@@ -64,6 +75,10 @@ export async function automationRoute(method:string,url:URL,body:unknown,key:str
         if(!key)return {status:400,body:{error:'Idempotency-Key required'}};
         const run=await runtime.tasks.runNow(owner,match[1],key);runtime.wake(owner);
         return {status:201,body:{run}};
+      }
+      if(method==='POST'&&match[2]==='stop-monitor'){
+        if(!key)return {status:400,body:{error:'Idempotency-Key required'}};
+        return {status:200,body:await runtime.tasks.stopMonitor(owner,match[1],key)};
       }
       if (method==='POST'&&match[2]) {
         if(!key)return {status:400,body:{error:'Idempotency-Key required'}};

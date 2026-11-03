@@ -18,14 +18,22 @@ try {
   db = new DatabaseSync(workerData.file);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
   const version = db.prepare('PRAGMA user_version').get().user_version;
-  if (version > 2) throw new Error('Unsupported automation schema version: ' + version);
+  if (version > 3) throw new Error('Unsupported automation schema version: ' + version);
   db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
+  if (version > 0 && version < 3 && workerData.file !== ':memory:') {
+    const backupDir = path.join(path.dirname(workerData.file), 'backups');
+    fs.mkdirSync(backupDir, {recursive:true});
+    const backup = path.join(backupDir, 'pre-v3-from-v' + version + '-' + require('node:crypto').randomUUID() + '.sqlite');
+    // VACUUM INTO takes a consistent SQLite snapshot, including committed WAL.
+    // Never copy an open .sqlite file while silently omitting its WAL sidecar.
+    db.prepare('VACUUM INTO ?').run(backup);
+  }
   db.exec('BEGIN IMMEDIATE');
   try {
     db.exec(workerData.schema);
     if (!db.prepare('PRAGMA table_info(notification_attempts)').all().some(c => c.name === 'part_id'))
       db.exec('ALTER TABLE notification_attempts ADD COLUMN part_id TEXT REFERENCES notification_parts(id)');
-    db.exec('PRAGMA user_version=2; COMMIT');
+    db.exec('PRAGMA user_version=3; COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   parentPort.postMessage({ready:true});
 } catch (e) { try { db?.close(); } catch {} parentPort.postMessage({fatal:String(e.message)}); parentPort.close(); }
@@ -104,6 +112,20 @@ CREATE TABLE IF NOT EXISTS notification_parts (
  part_index INTEGER NOT NULL, content TEXT NOT NULL, state TEXT NOT NULL,
  attempt_id TEXT, UNIQUE(notification_id,part_index)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS gpu_watches (
+ task_id TEXT PRIMARY KEY REFERENCES tasks(id), revision INTEGER NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id),
+ state TEXT NOT NULL, next_check INTEGER NOT NULL, deadline INTEGER NOT NULL,
+ last_signature TEXT, stable_signature TEXT, stable_count INTEGER NOT NULL DEFAULT 0,
+ last_observation_id TEXT, updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS gpu_watches_due ON gpu_watches(state,next_check);
+CREATE TABLE IF NOT EXISTS gpu_observations (
+ id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), run_id TEXT NOT NULL REFERENCES runs(id),
+ server_alias TEXT NOT NULL, binding_hash TEXT NOT NULL, observed_at INTEGER NOT NULL,
+ valid_until INTEGER NOT NULL, validity TEXT NOT NULL, payload TEXT NOT NULL,
+ previous_valid_id TEXT REFERENCES gpu_observations(id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS gpu_observations_task ON gpu_observations(task_id,observed_at);
 `;
 
 export class AutomationStore {

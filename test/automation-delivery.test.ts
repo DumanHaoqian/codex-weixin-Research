@@ -90,7 +90,7 @@ test('v1 migration preserves tasks and adds delivery parts transactionally',asyn
       {sql:"INSERT INTO tasks VALUES ('task','account','sender',1,'paused','{}',NULL,0,0)"}
     ]);
     await store.close();store=new AutomationStore(file);
-    assert.equal((await store.all('PRAGMA user_version'))[0].user_version,2);
+    assert.equal((await store.all('PRAGMA user_version'))[0].user_version,3);
     assert.equal((await store.all('SELECT id FROM tasks'))[0].id,'task');
     assert.equal((await store.all('PRAGMA table_info(notification_attempts)')).some(c=>c.name==='part_id'),true);
   }finally{await store.close();fs.rmSync(root,{recursive:true,force:true});}

@@ -5,7 +5,7 @@ import type { Owner } from './tasks.js';
 
 export type Page<T> = { items: T[]; nextCursor: string | null };
 export type PageInput = { limit?: number; cursor?: string };
-export type HistoryKind = 'tasks' | 'runs' | 'notifications';
+export type HistoryKind = 'tasks' | 'runs' | 'notifications' | 'gpu_observations';
 const inputSchema = z.object({ limit: z.number().int().min(1).max(100).default(50), cursor: z.string().max(1500).optional() }).strict();
 const cursorSchema = z.object({ scope: z.string(), at: z.number().int(), id: z.string().uuid() }).strict();
 
@@ -26,7 +26,9 @@ export async function historyPage(store: AutomationStore, owner: Owner, kind: Hi
     ? { select: 't.*', from: 'tasks t', at: 't.created_at', id: 't.id' }
     : kind === 'runs'
       ? { select: 'r.*', from: 'runs r JOIN tasks t ON t.id=r.task_id', at: 'r.start_deadline', id: 'r.id' }
-      : { select: 'n.*', from: 'notifications n JOIN events e ON e.id=n.event_id JOIN tasks t ON t.id=e.task_id', at: 'e.created_at', id: 'n.id' };
+      : kind==='gpu_observations'
+        ? {select:'o.*',from:'gpu_observations o JOIN tasks t ON t.id=o.task_id',at:'o.observed_at',id:'o.id'}
+        : { select: 'n.*', from: 'notifications n JOIN events e ON e.id=n.event_id JOIN tasks t ON t.id=e.task_id', at: 'e.created_at', id: 'n.id' };
   const params: SqlValue[] = [owner.accountId, owner.senderId];
   let where = 't.account_id=? AND t.sender_id=?';
   if (boundary) {

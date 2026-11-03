@@ -10,6 +10,7 @@ export type AppServerRunnerOptions = {
   approvalPolicy?: CodexApprovalPolicy;
   codexBin?: string;
   requestTimeoutMs?: number;
+  disableHooks?: boolean;
 };
 
 export type CodexRunnerInput = {
@@ -181,6 +182,26 @@ export class AppServerCodexRunner {
     return this.request("thread/list", {});
   }
 
+  // Deterministic automation collectors never start a model turn. Keep this
+  // session separate from chat, and retain the existing approval-denial handler.
+  async openObservationSession(cwd: string): Promise<string> {
+    await this.ensureConnected();
+    const response = await this.request('thread/start', {
+      cwd, sandbox:'read-only', approvalPolicy:'never', ephemeral:true,
+      config:{'features.hooks':false}
+    }) as Record<string, unknown>;
+    const thread=response.thread as Record<string, unknown> | undefined;
+    const sandbox=response.sandbox as Record<string, unknown> | undefined;
+    if(typeof thread?.id!=='string'||response.approvalPolicy!=='never'||sandbox?.type!=='readOnly')
+      throw new Error('Read-only MCP observation session could not be verified');
+    return thread.id;
+  }
+
+  async callObservationTool(threadId: string, tool:'servers_list'|'ssh_exec', args:Record<string,unknown>):Promise<unknown>{
+    await this.ensureConnected();
+    return this.request('mcpServer/tool/call',{threadId,server:'polyu4090',tool,arguments:args},45_000);
+  }
+
   async getHistory(threadId: string): Promise<CodexHistoryMessage[]> {
     await this.ensureConnected();
     const response = await this.request("thread/read", { threadId, includeTurns: true }) as Record<string, unknown>;
@@ -287,7 +308,8 @@ export class AppServerCodexRunner {
     const command = resolveCodexCommand(this.options.codexBin ?? "codex");
     const permissionArgs = [
       ...(this.options.sandbox ? ["-c", `sandbox_mode=${JSON.stringify(this.options.sandbox)}`] : []),
-      ...(this.options.approvalPolicy ? ["-c", `approval_policy=${JSON.stringify(this.options.approvalPolicy)}`] : [])
+      ...(this.options.approvalPolicy ? ["-c", `approval_policy=${JSON.stringify(this.options.approvalPolicy)}`] : []),
+      ...(this.options.disableHooks ? ['-c','features.hooks=false'] : [])
     ];
     const child = spawn(command.command, [...command.argsPrefix, "app-server", "--stdio", ...permissionArgs], {
       stdio: ["pipe", "pipe", "pipe"],

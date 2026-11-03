@@ -18,6 +18,7 @@ import { startRestartControl, stopService } from "./restart-control.js";
 import { isCurrentRuntimeInstallable, UpdateManager } from "./update-manager.js";
 import { AutomationRuntime } from "../automation/runtime.js";
 import { handleWeixinAutomation } from "../automation/weixin-commands.js";
+import { createGpuTransport } from '../automation/gpu-transport.js';
 
 async function main(): Promise<void> {
   const launchCwd = process.cwd();
@@ -83,6 +84,8 @@ async function main(): Promise<void> {
         throw new Error('Remote automation access requires configured Web authentication');
       }
       automation = new AutomationRuntime(paths.root, {
+        gpu:process.env.CODEX_WEIXIN_AUTOMATION_GPU_SERVERS?.trim()?createGpuTransport(paths.root,loadConfig(paths).codexBin,
+          process.env.CODEX_WEIXIN_AUTOMATION_GPU_SERVERS.split(',').map(value=>value.trim()).filter(Boolean)):undefined,
         send:(owner,text)=>accountManager.sendAutomationText(owner,text),
         authorize: (owner) => {
           const account = accountManager.listAccounts().find(item=>item.accountId===owner.accountId);

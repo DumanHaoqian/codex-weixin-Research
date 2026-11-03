@@ -8,8 +8,9 @@ const help=['定时任务：',
   '/tasks at 2026-12-01T09:00:00+08:00 提醒内容',
   '/tasks show|pause|resume|delete|run <任务ID>',
   '/tasks edit <任务ID> <完整任务JSON>',
+  '/tasks gpu <服务器> <监控时长，如1h> <说明>', '/gpu', '/gpu history', '/gpu stop <任务ID>',
   '/tasks notifications', '/tasks resend <通知ID> [unknown|accepted]',
-  '目前支持提醒；科研/模型执行尚未启用。时间默认 Asia/Shanghai。'].join('\n');
+  'GPU 监控需先配置只读 MCP；仅观测，不启动训练或占卡。模型执行尚未启用。时间默认 Asia/Shanghai。'].join('\n');
 
 function describe(task:Task):string{
   const next=task.nextDue===null?'无':new Intl.DateTimeFormat('zh-CN',{timeZone:task.definition.schedule.timezone,dateStyle:'short',timeStyle:'short'}).format(task.nextDue);
@@ -25,12 +26,24 @@ export async function handleWeixinAutomation(runtime:AutomationRuntime|undefined
   const text=message.text.trim();
   const natural=/^(?:请)?(\d+)(分钟|小时|天)后提醒我[，,:：\s]*(.+)$/s.exec(text);
   const daily=/^(?:请)?每天\s*((?:[01]?\d|2[0-3]):[0-5]\d)\s*提醒我[，,:：\s]*(.+)$/s.exec(text);
-  const isCommand=/^\/tasks(?:\s|$)/.test(text);
+  const isCommand=/^\/(?:tasks|gpu)(?:\s|$)/.test(text);
   if(!isCommand&&!natural&&!daily){runtime?.wake(owner);return undefined;}
   if(!runtime)return '定时任务预览尚未启用。请在本机服务设置 CODEX_WEIXIN_AUTOMATION=1 后重启。';
   runtime.wake(owner);
   if(message.attachments?.length)return '任务创建暂不接收附件，请用明确的文字内容。';
   try{
+    const gpu=/^\/gpu(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(text);
+    if(gpu){
+      await runtime.tasks.authorized(owner);
+      if(gpu[1]==='stop')return `监控状态：${(await runtime.tasks.stopMonitor(owner,gpu[2]?.trim()??'',message.id)).state}。没有终止服务器进程。`;
+      if(gpu[1]==='history'){
+        const page=await runtime.tasks.page(owner,'gpu_observations',{limit:5});
+        return page.items.map(o=>`${o.task_id} · ${o.server_alias} · ${o.validity}\n${new Date(Number(o.observed_at)).toISOString()}\n${o.payload}`).join('\n\n')||'暂无 GPU 观测记录。';
+      }
+      const watches=await runtime.store.all(`SELECT w.task_id,w.state,w.deadline,o.observed_at,o.valid_until,o.validity,o.payload FROM gpu_watches w
+        JOIN tasks t ON t.id=w.task_id LEFT JOIN gpu_observations o ON o.id=w.last_observation_id WHERE t.account_id=? AND t.sender_id=? ORDER BY w.updated_at DESC LIMIT 10`,[owner.accountId,owner.senderId]);
+      return watches.map(w=>`${w.task_id} · ${w.state}\n${w.observed_at===null?'尚无读数':Number(w.valid_until)<now?'历史读数已过期':w.validity}\n截止：${new Date(Number(w.deadline)).toISOString()}\n${w.payload??''}`).join('\n\n')||'暂无 GPU 监控。使用 /tasks gpu <服务器> 1h <说明> 创建。';
+    }
     const match=/^\/tasks(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(text);
     let action=match?.[1]??'list',args=match?.[2]??'';
     if(natural){action='add';args=`${natural[1]}${natural[2]==='分钟'?'m':natural[2]==='小时'?'h':'d'} ${natural[3]}`;}
@@ -62,7 +75,14 @@ export async function handleWeixinAutomation(runtime:AutomationRuntime|undefined
     }
     const timezone='Asia/Shanghai';let definition:TaskInput;
     const prefix={kind:'reminder' as const,title:'微信提醒'};
-    if(['add','daily','every','at'].includes(action)){
+    if(action==='gpu'){
+      if(!runtime.gpu)throw new Error('GPU 只读 MCP 尚未配置');
+      const split=/^(\S+)\s+(\S+)\s+([\s\S]+)$/.exec(args);if(!split)throw new Error(help);
+      const target=(await runtime.gpu.port.targets()).find(t=>t.server===split[1]);if(!target)throw new Error('服务器不在已配置的观测范围');
+      definition={kind:'gpu_watch',title:'GPU 监控',prompt:split[3],notification:'findings_or_failure',
+        gpuWatch:{server:target.server,bindingHash:target.bindingHash,durationSeconds:seconds(split[2])},
+        schedule:{kind:'once',atUtc:new Date(now+1000).toISOString(),timezone}};
+    }else if(['add','daily','every','at'].includes(action)){
       const split=/^(\S+)\s+([\s\S]+)$/.exec(args);if(!split)throw new Error(help);
       const [,value,prompt]=split;
       const schedule=action==='daily'?{kind:'daily' as const,time:value,timezone}:action==='every'
@@ -75,7 +95,7 @@ export async function handleWeixinAutomation(runtime:AutomationRuntime|undefined
       definition={...prefix,prompt:split[3],schedule:{kind:'weekly',weekdays:split[1].split(',').map(Number),time:split[2],timezone}};
     }else return help;
     const task=await runtime.tasks.create(owner,`wx:${message.id}`,definition,false,text);
-    return `已保存提醒：\n${describe(task)}`;
+    return `已保存${task.definition.kind==='gpu_watch'?' GPU 监控':'提醒'}：\n${describe(task)}`;
   }catch(error){
     if(error instanceof z.ZodError)return `任务参数无效：${error.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; ')}`;
     return `任务操作未完成：${error instanceof Error?error.message:String(error)}`;

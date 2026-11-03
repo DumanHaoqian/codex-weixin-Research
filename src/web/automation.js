@@ -1,6 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const state={token:'',accounts:[],allowlist:[],tasks:[],edit:null,busy:false,enabled:false,generation:0,keys:new Map(),intervalAnchor:null};
+state.targets=[];state.targetsLoaded=false;
 const pages={};
 function resetPages(){for(const name of ['tasks','runs','notifications'])pages[name]={cursor:null,next:null,back:[]};}
 resetPages();
@@ -12,8 +13,8 @@ function pagination(){
     $(`${name}-pages`).replaceChildren(previous,el('span',`第 ${page.back.length+1} 页`,'muted'),next);
   }
 }
-const labels={active:'运行中',paused:'已暂停',completed:'计划已耗尽',draft:'草稿',deleted:'已删除',
-  succeeded:'执行成功',blocked:'受阻',missed:'漏跑',pending:'待投递',failed:'已拒绝/失败',unknown:'结果未知',cancelled:'已取消',api_accepted:'API 已接受 · 送达未确认'};
+const labels={active:'计划已启用',paused:'计划已暂停',completed:'计划已耗尽',draft:'草稿',deleted:'已删除',
+  watching:'监控中',stopped:'监控已停止',expired:'监控已到期',skipped:'已有监控，跳过重复启动',succeeded:'执行成功',blocked:'受阻',missed:'漏跑',pending:'待投递',failed:'已拒绝/失败',unknown:'结果未知',cancelled:'已取消',api_accepted:'API 已接受 · 送达未确认'};
 function el(tag,text,cls){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(cls)node.className=cls;return node;}
 function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':'';}
 function scope(){return new URLSearchParams({accountId:$('account').value,senderId:$('sender').value}).toString();}
@@ -42,14 +43,15 @@ function format(at,zone='Asia/Shanghai'){
 }
 function syncFields(){
   const kind=$('schedule').value;
+  const gpu=$('task-kind').value==='gpu_watch';$('gpu-fields').hidden=!gpu;
   $('once-field').hidden=kind!=='once';$('at').required=kind==='once';
   $('time-field').hidden=!['daily','weekly'].includes(kind);$('week-field').hidden=kind!=='weekly';$('interval-field').hidden=kind!=='interval';
-  $('save').disabled=!state.enabled||!$('sender').value;
+  $('save').disabled=!state.enabled||!$('sender').value||(gpu&&!$('gpu-server').value);
   $('preview').disabled=!state.enabled||!$('sender').value;
   pagination();
 }
 function reset(){
-  state.edit=null;state.intervalAnchor=null;$('task-form').reset();$('form-title').textContent='新建提醒';$('save').textContent='保存提醒';$('preview-times').textContent='';syncFields();
+  state.edit=null;state.intervalAnchor=null;$('task-form').reset();$('form-title').textContent='新建任务';$('save').textContent='保存任务';$('preview-times').textContent='';syncFields();
 }
 function chooseSenders(){
   resetPages();
@@ -61,6 +63,7 @@ function chooseSenders(){
   reset();
 }
 async function bootstrap(){
+  state.targetsLoaded=false;
   const response=await fetch('/api/bootstrap',{credentials:'same-origin'});
   if(response.status===401){location.assign('/');return;}
   if(!response.ok)throw new Error('无法读取账号配置');
@@ -72,8 +75,10 @@ async function bootstrap(){
 }
 function button(label,fn){const b=el('button',label);b.type='button';b.addEventListener('click',()=>action(fn));return b;}
 function edit(task){
-  if(task.definition.kind!=='reminder'){message('此预览页面仅编辑提醒；科研草稿需等待对应能力。',true);return;}
-  state.edit=task;$('form-title').textContent='编辑提醒';$('save').textContent='保存修改';
+  if(!['reminder','gpu_watch'].includes(task.definition.kind)){message('此任务类型尚未开放编辑。',true);return;}
+  state.edit=task;$('form-title').textContent='编辑任务';$('save').textContent='保存修改';$('task-kind').value=task.definition.kind;
+  const g=task.definition.gpuWatch;
+  if(g){$('gpu-server').value=g.server;$('gpu-duration').value=g.durationSeconds/60;$('gpu-period').value=g.sampleSeconds;$('gpu-free').value=g.minFreeBytes/1024**3;$('gpu-used').value=g.maxUsedBytes/1024**2;$('gpu-stable').value=g.stableSamples;}
   $('title').value=task.definition.title;$('prompt').value=task.definition.prompt;
   const s=task.definition.schedule;$('schedule').value=s.kind;$('timezone').value=s.timezone;$('notification').value=task.definition.notification;
   if(s.time)$('time').value=s.time;
@@ -85,6 +90,24 @@ function edit(task){
   if(s.kind==='interval')$('interval').value=s.everySeconds/60;
   for(const checkbox of document.querySelectorAll('[name=weekday]'))checkbox.checked=(s.weekdays||[]).includes(Number(checkbox.value));
   $('preview-times').textContent='';syncFields();$('title').focus();
+}
+function renderWatches(watches){
+  $('gpu-watches').replaceChildren();
+  for(const watch of watches){
+    const record=el('article',undefined,'record');
+    record.append(el('span',labels[watch.state]||watch.state,'badge'),el('p',`任务：${watch.task_id} · 截止：${format(watch.deadline)}`,'muted'));
+    try{
+      const payload=JSON.parse(watch.payload||'{}');
+      const fresh=watch.state==='watching'&&watch.validity==='valid'&&Date.now()<=watch.valid_until;
+      const availability={candidate_observed:'观测到满足条件的候选卡',stabilizing:'等待连续确认',busy:'有占用或不满足条件',unavailable:'无法观测'};
+      record.append(el('p',watch.observed_at===null?'尚无读数':`${fresh?'有效观测':'历史或不可用读数'} · ${format(watch.observed_at)} · ${availability[payload.availability]||watch.validity}`));
+      for(const d of payload.snapshot?.devices||[])record.append(el('p',`${d.name} · ${d.uuid}\n已用 ${(d.usedBytes/1024**3).toFixed(1)} / ${(d.totalBytes/1024**3).toFixed(1)} GiB · 利用率 ${d.utilization}% · 计算进程 ${d.processes.length}`));
+      if(payload.error)record.append(el('p','当前无法观测。请检查 MCP 连接、审批和保存的服务器绑定；历史读数不能用来判断当前空闲。'));
+    }catch{record.append(el('p','无法读取观测记录'));}
+    if(watch.state==='watching')record.append(button('停止监控',async()=>{await request(`/tasks/${watch.task_id}/stop-monitor`,'POST',{});message('监控已停止，服务器进程保持运行。');await refresh();}));
+    $('gpu-watches').append(record);
+  }
+  if(!watches.length)$('gpu-watches').append(el('p','暂无 GPU 监控。创建前需配置只读 MCP 观测服务器。','empty'));
 }
 function renderTasks(tasks){
   state.tasks=tasks;const visible=tasks.filter(t=>t.state!=='deleted');$('task-count').textContent=`本页 ${visible.length} 项`;
@@ -125,16 +148,26 @@ async function refresh(){
   if(generation!==state.generation)return;
   state.enabled=runtime.enabled;
   $('status').textContent=!runtime.enabled?'定时预览未启用。展开下方“当前支持范围与服务设置”查看启用方法。':runtime.error?`调度异常：${runtime.error}`:
-    `调度服务${runtime.running?'运行中':'尚未启动'} · 微信投递${runtime.delivery.ready?'已连接':'未配置'} · 科研执行尚未启用`;
+    `调度服务${runtime.running?'运行中':'尚未启动'} · 微信投递${runtime.delivery.ready?'已连接':'未配置'} · GPU 观测${runtime.gpuObservation?.configured?'已配置':'未配置'} · 模型执行尚未启用`;
   $('status').classList.toggle('error',Boolean(runtime.error));syncFields();
   if(!runtime.enabled||!$('account').value||!$('sender').value){
-    $('tasks').replaceChildren(el('p','请选择已启用账号的授权接收人。','empty'));$('runs').replaceChildren();$('notifications').replaceChildren();return;
+    $('tasks').replaceChildren(el('p','请选择已启用账号的授权接收人。','empty'));$('runs').replaceChildren();$('notifications').replaceChildren();renderWatches([]);return;
   }
-  const [tasks,runs,notifications]=await Promise.all(['tasks','runs','notifications'].map(name=>
-    request(`/${name}`,'GET',undefined,ownerScope+'&limit=50'+(pages[name].cursor?'&cursor='+encodeURIComponent(pages[name].cursor):''))));
+  if(runtime.gpuObservation?.configured&&!state.targetsLoaded){
+    state.targetsLoaded=true;
+    try{
+      const response=await request('/gpu/targets','GET',undefined,ownerScope);state.targets=response.targets;
+      const prior=$('gpu-server').value;$('gpu-server').replaceChildren(...state.targets.map(t=>new Option(t.server,t.server)));
+      if(state.targets.some(t=>t.server===prior))$('gpu-server').value=prior;
+    }catch{message('GPU MCP 不可用；提醒功能仍可使用。',true);}
+    syncFields();
+  }
+  const [tasks,runs,notifications,watches]=await Promise.all([
+    ...['tasks','runs','notifications'].map(name=>request(`/${name}`,'GET',undefined,ownerScope+'&limit=50'+(pages[name].cursor?'&cursor='+encodeURIComponent(pages[name].cursor):''))),
+    request('/gpu/watches','GET',undefined,ownerScope)]);
   if(generation!==state.generation||ownerScope!==scope())return;
   for(const [name,value] of [['tasks',tasks],['runs',runs],['notifications',notifications]])pages[name].next=value.nextCursor;
-  renderTasks(tasks.tasks);renderRecords(runs.items,notifications.items);pagination();
+  renderTasks(tasks.tasks);renderRecords(runs.items,notifications.items);renderWatches(watches.items);pagination();
 }
 async function definition(forSave=false){
   const timezone=$('timezone').value.trim(),kind=$('schedule').value;
@@ -154,10 +187,20 @@ async function definition(forSave=false){
     }
     schedule={kind,timezone,everySeconds,anchorUtc};
   }
-  return {kind:'reminder',title:$('title').value,prompt:$('prompt').value,projectId:state.edit?.definition.projectId||null,schedule,notification:$('notification').value};
+  const result={kind:$('task-kind').value,title:$('title').value,prompt:$('prompt').value,projectId:state.edit?.definition.projectId||null,schedule,notification:$('notification').value};
+  if(result.kind==='gpu_watch'){
+    const target=state.targets.find(t=>t.server===$('gpu-server').value);if(!target)throw new Error('请先配置可用的观测服务器');
+    const saved=state.edit?.definition.gpuWatch;
+    result.gpuWatch={server:target.server,bindingHash:saved?.server===target.server?saved.bindingHash:target.bindingHash,
+      durationSeconds:Number($('gpu-duration').value)*60,sampleSeconds:Number($('gpu-period').value),minFreeBytes:Math.round(Number($('gpu-free').value)*1024**3),
+      maxUsedBytes:Math.round(Number($('gpu-used').value)*1024**2),stableSamples:Number($('gpu-stable').value),gpuUuids:saved?.gpuUuids||[],maxUtilization:saved?.maxUtilization??0};
+  }
+  return result;
 }
 document.addEventListener('DOMContentLoaded',()=>{
   $('schedule').addEventListener('change',syncFields);
+  $('task-kind').addEventListener('change',syncFields);
+  $('gpu-server').addEventListener('change',syncFields);
   $('reset').addEventListener('click',reset);
   $('account').addEventListener('change',()=>{chooseSenders();void refresh().catch(e=>message(e.message,true));});
   $('sender').addEventListener('change',()=>{resetPages();reset();void refresh().catch(e=>message(e.message,true));});
@@ -172,7 +215,7 @@ document.addEventListener('DOMContentLoaded',()=>{
       const editing=state.edit;
       if(editing)await request(`/tasks/${editing.id}`,'PATCH',{expectedRevision:editing.revision,definition:def});
       else await request('/tasks','POST',{definition:def});
-      reset();message(editing?'修改已保存。':'提醒已保存。');await refresh();
+      reset();message(editing?'修改已保存；已启动的监控继续使用原快照。':'任务已保存。');await refresh();
     });
   });
   void action(async()=>{await bootstrap();await refresh();});

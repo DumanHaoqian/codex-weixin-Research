@@ -19,8 +19,16 @@
     <div class="layout">
       <section class="panel"><div class="panel-heading"><h2 id="form-title">新建提醒</h2><button type="button" id="reset">清空</button></div>
         <form id="task-form">
+          <label>任务类型<select id="task-kind"><option value="reminder">提醒</option><option value="gpu_watch">GPU 占用监控</option></select></label>
           <label>名称<input id="title" maxlength="120" required placeholder="例：检查今晚实验结果"></label>
           <label>提醒内容<textarea id="prompt" rows="4" maxlength="32000" required placeholder="到点后发给我的内容"></textarea></label>
+          <fieldset id="gpu-fields" hidden><legend>GPU 观测条件</legend>
+            <label>服务器<select id="gpu-server"></select></label>
+            <div class="fields"><label>监控分钟数<input id="gpu-duration" type="number" min="1" max="10080" value="60"></label><label>采样间隔（秒）<input id="gpu-period" type="number" min="5" max="3600" value="15"></label></div>
+            <div class="fields"><label>至少空闲显存（GiB）<input id="gpu-free" type="number" min="0" max="1000" value="0" step="0.1"></label><label>最多已用显存（MiB）<input id="gpu-used" type="number" min="0" max="100000" value="64"></label></div>
+            <label>连续满足次数<input id="gpu-stable" type="number" min="1" max="20" value="2"></label>
+            <p class="muted">只读监控；候选卡还须利用率为零且没有计算进程。不会占卡、启动训练或终止进程。时间计划决定何时开始，每次监控另有截止时间。</p>
+          </fieldset>
           <div class="fields"><label>重复方式<select id="schedule"><option value="once">一次性</option><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">固定间隔</option></select></label>
             <label>时区<input id="timezone" value="Asia/Shanghai" required></label></div>
           <label id="once-field">日期与时间<input id="at" type="datetime-local" required></label>
@@ -36,12 +44,13 @@
       </section>
       <section class="panel"><div class="panel-heading"><h2>任务</h2><span id="task-count" class="muted"></span></div><div id="tasks" aria-live="polite"></div><nav id="tasks-pages" class="actions" aria-label="任务分页"></nav></section>
     </div>
+    <section class="panel records"><div class="panel-heading"><h2>GPU 监控</h2><span class="muted">仅在变化、异常和到期时通知</span></div><p class="muted">暂停计划只阻止新的监控；“停止监控”停止采样，删除任务也会停止采样。已有训练保持运行。过期读数只作历史参考。</p><div id="gpu-watches"></div></section>
     <section class="panel records"><div class="panel-heading"><h2>执行与通知</h2><span class="muted">每页 50 条，可翻页查看历史</span></div>
       <p class="muted">“API 已接受”表示微信接口接受请求，实际送达尚未确认。重发未知或已接受的消息可能重复；重发不会重新执行任务。</p>
       <label class="duplicate-option"><input id="allow-duplicate" type="checkbox">允许重发未知或已接受的通知（可能重复）</label>
       <div class="records-grid"><div><h3>执行记录</h3><div id="runs"></div><nav id="runs-pages" class="actions" aria-label="执行记录分页"></nav></div><div><h3>通知</h3><div id="notifications"></div><nav id="notifications-pages" class="actions" aria-label="通知分页"></nav></div></div>
     </section>
-    <details class="panel"><summary>当前支持范围与服务设置</summary><p>当前支持提醒调度及微信投递。模型执行、科研作业、GPU 和文献任务尚未启用。</p><p>需使用本分支构建运行，并设置 <code>CODEX_WEIXIN_AUTOMATION=1</code> 后重启该服务。关闭网页不影响调度；电脑关机或退出桥接后，本地计划不能执行。超过 5 分钟的普通漏跑不会自动补跑。</p><p>微信也可使用 <code>/tasks help</code>，或发送“30分钟后提醒我检查结果”。</p></details>
+    <details class="panel"><summary>当前支持范围与服务设置</summary><p>支持提醒和可选的只读 GPU 监控。模型执行、训练管理、占卡和文献任务尚未启用。GPU 监控还需配置允许观测的 MCP 服务器。</p><p>需使用本分支构建运行，并设置 <code>CODEX_WEIXIN_AUTOMATION=1</code> 后重启该服务。关闭网页不影响调度；电脑关机或退出桥接后，本地计划不能执行。超过 5 分钟的普通漏跑不会自动补跑。</p><p>微信也可使用 <code>/tasks help</code>，或发送“30分钟后提醒我检查结果”。</p></details>
   </main>
 </body>
 </html>
